@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-const configPath = "/etc/quadlet-deploy/config.env"
+const configPath = "/etc/quadsync/config.env"
 
 func main() {
 	log.SetFlags(0)
-	log.SetPrefix("quadlet-deploy: ")
+	log.SetPrefix("quadsync: ")
 
 	if len(os.Args) < 2 {
 		usage()
@@ -34,9 +34,9 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  quadlet-deploy sync              Full reconcile (git-sync, merge, deploy)")
-	fmt.Fprintln(os.Stderr, "  quadlet-deploy check <dir>       Validate .container files")
-	fmt.Fprintln(os.Stderr, "  quadlet-deploy augment <file>    Print merged result to stdout")
+	fmt.Fprintln(os.Stderr, "  quadsync sync              Full reconcile (git-sync, merge, deploy)")
+	fmt.Fprintln(os.Stderr, "  quadsync check <dir>       Validate .container files")
+	fmt.Fprintln(os.Stderr, "  quadsync augment <file>    Print merged result to stdout")
 }
 
 func cmdSync() {
@@ -51,7 +51,7 @@ func cmdSync() {
 
 func cmdCheck() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: quadlet-deploy check <dir>")
+		fmt.Fprintln(os.Stderr, "Usage: quadsync check <dir>")
 		os.Exit(2)
 	}
 	dir := os.Args[2]
@@ -67,7 +67,7 @@ func cmdCheck() {
 
 func cmdAugment() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: quadlet-deploy augment <file>")
+		fmt.Fprintln(os.Stderr, "Usage: quadsync augment <file>")
 		os.Exit(2)
 	}
 

@@ -42,10 +42,10 @@ func LoadConfig(path string) (Config, error) {
 		c.GitBranch = "main"
 	}
 	if c.TransformDir == "" {
-		c.TransformDir = "/etc/quadlet-deploy/transforms"
+		c.TransformDir = "/etc/quadsync/transforms"
 	}
 	if c.StateDir == "" {
-		c.StateDir = "/var/lib/quadlet-deploy"
+		c.StateDir = "/var/lib/quadsync"
 	}
 	if c.UserGroup == "" {
 		c.UserGroup = "cusers"

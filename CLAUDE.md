@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-quadlet-deploy is a Go CLI tool that deploys Podman Quadlet containers from a Git repository onto a Linux host. It creates per-container Linux users, applies INI-based transforms, and manages rootless systemd services. Designed for Fedora CoreOS / systemd-based environments.
+quadsync is a Go CLI tool that deploys Podman Quadlet containers from a Git repository onto a Linux host. It creates per-container Linux users, applies INI-based transforms, and manages rootless systemd services. Designed for Fedora CoreOS / systemd-based environments.
 
 ## Build & Test Commands
 
@@ -18,7 +18,7 @@ go vet ./...                        # Lint
 
 Release build (static ARM64 binary):
 ```bash
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o quadlet-deploy-linux-arm64 .
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o quadsync-linux-arm64 .
 ```
 
 ## Architecture
@@ -36,12 +36,12 @@ All code is in the `main` package (flat structure, no sub-packages). Zero extern
 
 **Sync workflow (reconcile.go:Sync):**
 1. Git clone or fetch+reset the configured repo
-2. Load transform files from `/etc/quadlet-deploy/transforms/`
+2. Load transform files from `/etc/quadsync/transforms/`
 3. Build desired state: root-level `.container` files used as-is; subdirectory `.container` files get merged with the matching transform
 4. For each container: create user if needed → skip if content hash unchanged → write quadlet → daemon-reload → restart
 5. Clean up removed containers: stop service → remove quadlet → delete user
 
-**Configuration** is read from `/etc/quadlet-deploy/config.env`:
+**Configuration** is read from `/etc/quadsync/config.env`:
 - `QDEPLOY_GIT_URL` (required), `QDEPLOY_GIT_BRANCH` (default: "main"), `QDEPLOY_TRANSFORM_DIR`, `QDEPLOY_STATE_DIR`, `QDEPLOY_USER_GROUP`
 
 **Container naming convention:** The `.container` filename (minus extension) becomes the Linux username and systemd service name. This is why `check` validates filenames as valid usernames.
