@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -124,11 +125,18 @@ func Sync(config Config) error {
 		return fmt.Errorf("creating hash dir: %w", err)
 	}
 
+	// Deploy loop error policy: quadsync reports failure for its own
+	// mechanisms (user creation, quadlet writing, daemon-reload). If a
+	// container fails to start, that is the container's problem — we log
+	// it as a warning but do not count it as a quadsync failure.
+	var errs []error
+
 	for name, content := range desired {
 		if !currentSet[name] {
 			log.Printf("creating user %s", name)
 			if err := createUser(name, config.UserGroup); err != nil {
 				log.Printf("error creating user %s: %v", name, err)
+				errs = append(errs, fmt.Errorf("creating user %s: %w", name, err))
 				continue
 			}
 		}
@@ -141,21 +149,29 @@ func Sync(config Config) error {
 		log.Printf("%s: deploying", name)
 		if err := writeQuadlet(name, name, content); err != nil {
 			log.Printf("error writing quadlet for %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("writing quadlet for %s: %w", name, err))
 			continue
 		}
 		if err := waitForUserManager(name); err != nil {
 			log.Printf("error waiting for user manager %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("waiting for user manager %s: %w", name, err))
 			continue
 		}
 		if err := daemonReload(name); err != nil {
 			log.Printf("error daemon-reload for %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("daemon-reload for %s: %w", name, err))
 			continue
 		}
-		if err := restartService(name, name); err != nil {
-			log.Printf("error restarting %s: %v", name, err)
-			continue
-		}
+
+		// Quadlet is written and systemd knows about it — quadsync's job
+		// is done. Persist the hash so we don't re-deploy next cycle.
 		saveHash(hashDir, name, content)
+
+		// Best-effort service restart. If the container fails to come up
+		// that is the container's concern, not ours.
+		if err := restartService(name, name); err != nil {
+			log.Printf("warning: restarting %s: %v (container may need attention)", name, err)
+		}
 	}
 
 	// 6. Cleanup: remove containers not in desired
@@ -170,12 +186,13 @@ func Sync(config Config) error {
 			}
 			if err := deleteUser(name); err != nil {
 				log.Printf("error deleting user %s: %v", name, err)
+				errs = append(errs, fmt.Errorf("deleting user %s: %w", name, err))
 			}
 			os.Remove(filepath.Join(hashDir, name))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // loadTransforms reads all .container files from the transform directory.
