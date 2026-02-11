@@ -250,6 +250,13 @@ func managedUsers(group string) ([]string, error) {
 }
 
 func userHome(username string) (string, error) {
-	// On FCOS, system users created with --create-home get /home/<name>
-	return "/home/" + username, nil
+	out, err := exec.Command("getent", "passwd", username).Output()
+	if err != nil {
+		return "", fmt.Errorf("getent passwd %s: %w", username, err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(out)), ":")
+	if len(fields) < 6 || fields[5] == "" {
+		return "", fmt.Errorf("getent passwd %s: missing home directory field", username)
+	}
+	return fields[5], nil
 }
