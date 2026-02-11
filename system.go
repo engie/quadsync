@@ -174,13 +174,16 @@ func writeQuadlet(username, containerName, content string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating quadlet dir: %w", err)
 	}
+	path := filepath.Join(dir, containerName+".container")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return err
+	}
 	// chown the entire .config tree to the user — Podman refuses to run
 	// if any parent directory is not owned by the container user.
 	if _, err := run(defaultTimeout, "chown", "-R", username+":"+username, filepath.Join(home, ".config")); err != nil {
 		return fmt.Errorf("chowning .config for %s: %w", username, err)
 	}
-	path := filepath.Join(dir, containerName+".container")
-	return os.WriteFile(path, []byte(content), 0644)
+	return nil
 }
 
 // removeQuadlet removes a .container file from the user's quadlet directory.
