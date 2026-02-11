@@ -116,19 +116,27 @@ func Sync(config Config) error {
 		}
 	}
 
-	// 2. Load transforms
+	// 2. Validate specs
+	if errs := CheckDir(config.RepoPath); len(errs) > 0 {
+		for _, e := range errs {
+			log.Printf("validation error: %v", e)
+		}
+		return fmt.Errorf("validation failed: %d error(s)", len(errs))
+	}
+
+	// 3. Load transforms
 	transforms, err := loadTransforms(config.TransformDir)
 	if err != nil {
 		return fmt.Errorf("loading transforms: %w", err)
 	}
 
-	// 3. Build desired state
+	// 4. Build desired state
 	desired, err := buildDesired(config.RepoPath, transforms)
 	if err != nil {
 		return fmt.Errorf("building desired state: %w", err)
 	}
 
-	// 4. Get current managed users
+	// 5. Get current managed users
 	current, err := managedUsers(config.UserGroup)
 	if err != nil {
 		return fmt.Errorf("listing managed users: %w", err)
@@ -138,7 +146,7 @@ func Sync(config Config) error {
 		currentSet[u] = true
 	}
 
-	// 5. Deploy
+	// 6. Deploy
 	hashDir := filepath.Join(config.StateDir, "hashes")
 	if err := os.MkdirAll(hashDir, 0755); err != nil {
 		return fmt.Errorf("creating hash dir: %w", err)
@@ -200,7 +208,7 @@ func Sync(config Config) error {
 		}
 	}
 
-	// 6. Cleanup: remove containers not in desired
+	// 7. Cleanup: remove containers not in desired
 	for _, name := range current {
 		if _, exists := desired[name]; !exists {
 			log.Printf("%s: removing", name)
