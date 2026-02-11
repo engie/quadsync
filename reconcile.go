@@ -293,8 +293,7 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 		dirName := entry.Name()
 		transform, ok := transforms[dirName]
 		if !ok {
-			log.Printf("warning: no transform for directory %s, skipping", dirName)
-			continue
+			return nil, fmt.Errorf("no transform for directory %s", dirName)
 		}
 
 		subFiles, err := filepath.Glob(filepath.Join(repoPath, dirName, "*.container"))
