@@ -40,14 +40,14 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o quadsync-linu
 quadsync reads `/etc/quadsync/config.env`:
 
 ```env
-QDEPLOY_GIT_URL=https://github.com/you/your-containers.git
-QDEPLOY_GIT_BRANCH=main
-QDEPLOY_TRANSFORM_DIR=/etc/quadsync/transforms
-QDEPLOY_STATE_DIR=/var/lib/quadsync
-QDEPLOY_USER_GROUP=cusers
+QUADSYNC_GIT_URL=https://github.com/you/your-containers.git
+QUADSYNC_GIT_BRANCH=main
+QUADSYNC_TRANSFORM_DIR=/etc/quadsync/transforms
+QUADSYNC_STATE_DIR=/var/lib/quadsync
+QUADSYNC_USER_GROUP=cusers
 ```
 
-Only `QDEPLOY_GIT_URL` is required; the rest have defaults shown above.
+Only `QUADSYNC_GIT_URL` is required; the rest have defaults shown above.
 
 ## Usage
 

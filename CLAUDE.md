@@ -42,7 +42,7 @@ All code is in the `main` package (flat structure, no sub-packages). Zero extern
 5. Clean up removed containers: stop service → remove quadlet → delete user
 
 **Configuration** is read from `/etc/quadsync/config.env`:
-- `QDEPLOY_GIT_URL` (required), `QDEPLOY_GIT_BRANCH` (default: "main"), `QDEPLOY_TRANSFORM_DIR`, `QDEPLOY_STATE_DIR`, `QDEPLOY_USER_GROUP`
+- `QUADSYNC_GIT_URL` (required), `QUADSYNC_GIT_BRANCH` (default: "main"), `QUADSYNC_TRANSFORM_DIR`, `QUADSYNC_STATE_DIR`, `QUADSYNC_USER_GROUP`
 
 **Container naming convention:** The `.container` filename (minus extension) becomes the Linux username and systemd service name. This is why `check` validates filenames as valid usernames.
 

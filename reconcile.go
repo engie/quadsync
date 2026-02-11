@@ -32,16 +32,16 @@ func LoadConfig(path string) (Config, error) {
 
 	env := parseEnvFile(string(data))
 	c := Config{
-		GitURL:       env["QDEPLOY_GIT_URL"],
-		GitBranch:    env["QDEPLOY_GIT_BRANCH"],
-		TransformDir: env["QDEPLOY_TRANSFORM_DIR"],
-		StateDir:     env["QDEPLOY_STATE_DIR"],
-		UserGroup:    env["QDEPLOY_USER_GROUP"],
-		SSHKey:       env["QDEPLOY_SSH_KEY"],
+		GitURL:       env["QUADSYNC_GIT_URL"],
+		GitBranch:    env["QUADSYNC_GIT_BRANCH"],
+		TransformDir: env["QUADSYNC_TRANSFORM_DIR"],
+		StateDir:     env["QUADSYNC_STATE_DIR"],
+		UserGroup:    env["QUADSYNC_USER_GROUP"],
+		SSHKey:       env["QUADSYNC_SSH_KEY"],
 	}
 
 	if c.GitURL == "" {
-		return Config{}, fmt.Errorf("QDEPLOY_GIT_URL not set in config")
+		return Config{}, fmt.Errorf("QUADSYNC_GIT_URL not set in config")
 	}
 	if c.GitBranch == "" {
 		c.GitBranch = "main"
