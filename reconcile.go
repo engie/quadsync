@@ -19,6 +19,7 @@ type Config struct {
 	TransformDir string
 	StateDir     string
 	UserGroup    string
+	SSHKey       string // path to SSH deploy key for git
 	RepoPath     string // derived: StateDir + "/repo"
 }
 
@@ -36,6 +37,7 @@ func LoadConfig(path string) (Config, error) {
 		TransformDir: env["QDEPLOY_TRANSFORM_DIR"],
 		StateDir:     env["QDEPLOY_STATE_DIR"],
 		UserGroup:    env["QDEPLOY_USER_GROUP"],
+		SSHKey:       env["QDEPLOY_SSH_KEY"],
 	}
 
 	if c.GitURL == "" {
@@ -75,6 +77,11 @@ func parseEnvFile(data string) map[string]string {
 
 // Sync performs the full reconciliation: git sync, transform merge, deploy, cleanup.
 func Sync(config Config) error {
+	// Set GIT_SSH_COMMAND from config so git operations use the deploy key.
+	if config.SSHKey != "" {
+		os.Setenv("GIT_SSH_COMMAND", "ssh -i "+config.SSHKey+" -o StrictHostKeyChecking=accept-new")
+	}
+
 	// Ensure state dir exists
 	if err := os.MkdirAll(config.StateDir, 0755); err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
