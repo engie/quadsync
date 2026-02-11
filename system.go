@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // run executes a command and returns combined output.
@@ -77,17 +76,23 @@ func createUser(name, group string) error {
 	return nil
 }
 
-// waitForUserManager waits until a user's systemd instance is ready.
+// waitForUserManager ensures a user's systemd instance is ready.
+// Explicitly starts user@<uid>.service (no-op if already running) and
+// verifies the D-Bus socket exists before returning.
 func waitForUserManager(name string) error {
-	for i := 0; i < 30; i++ {
-		out, _ := run("systemctl", "--user", "-M", name+"@", "is-system-running")
-		state := strings.TrimSpace(out)
-		if state == "running" || state == "degraded" {
-			return nil
-		}
-		time.Sleep(time.Second)
+	uidStr, err := run("id", "-u", name)
+	if err != nil {
+		return fmt.Errorf("looking up uid for %s: %w", name, err)
 	}
-	return fmt.Errorf("timeout waiting for user manager for %s", name)
+	uid := strings.TrimSpace(uidStr)
+	if _, err := run("systemctl", "start", "user@"+uid+".service"); err != nil {
+		return fmt.Errorf("starting user manager for %s: %w", name, err)
+	}
+	busSocket := fmt.Sprintf("/run/user/%s/bus", uid)
+	if _, err := os.Stat(busSocket); err != nil {
+		return fmt.Errorf("user bus socket missing for %s after manager start: %s", name, busSocket)
+	}
+	return nil
 }
 
 // deleteUser stops services and removes a user.
@@ -138,22 +143,34 @@ func removeQuadlet(username, containerName string) error {
 	return os.Remove(path)
 }
 
+// runUserM runs "systemctl --user -M <user>@" with inherited stdout/stderr.
+// Output goes to the journal rather than being captured, because the machinectl
+// transport (-M) fails when Go pipes stdout/stderr via CombinedOutput().
+func runUserM(username string, args ...string) error {
+	cmdArgs := append([]string{"--user", "-M", username + "@"}, args...)
+	cmd := exec.Command("systemctl", cmdArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("systemctl --user -M %s@ %s: %w",
+			username, strings.Join(args, " "), err)
+	}
+	return nil
+}
+
 // daemonReload runs systemctl --user daemon-reload for a user.
 func daemonReload(username string) error {
-	_, err := run("systemctl", "--user", "-M", username+"@", "daemon-reload")
-	return err
+	return runUserM(username, "daemon-reload")
 }
 
 // restartService restarts a user service.
 func restartService(username, serviceName string) error {
-	_, err := run("systemctl", "--user", "-M", username+"@", "restart", serviceName+".service")
-	return err
+	return runUserM(username, "restart", serviceName+".service")
 }
 
 // stopService stops a user service.
 func stopService(username, serviceName string) error {
-	_, err := run("systemctl", "--user", "-M", username+"@", "stop", serviceName+".service")
-	return err
+	return runUserM(username, "stop", serviceName+".service")
 }
 
 // managedUsers returns the list of users in the given group.
