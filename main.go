@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -25,6 +26,8 @@ func main() {
 		cmdCheck()
 	case "augment":
 		cmdAugment()
+	case "redeploy":
+		cmdRedeploy()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		usage()
@@ -37,6 +40,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  quadsync sync              Full reconcile (git-sync, merge, deploy)")
 	fmt.Fprintln(os.Stderr, "  quadsync check <dir>       Validate .container files")
 	fmt.Fprintln(os.Stderr, "  quadsync augment <file>    Print merged result to stdout")
+	fmt.Fprintln(os.Stderr, "  quadsync redeploy <name>   Force redeployment on next sync")
 }
 
 func cmdSync() {
@@ -105,6 +109,28 @@ func cmdAugment() {
 
 	merged := MergeTransform(spec, transform)
 	fmt.Print(merged.String())
+}
+
+func cmdRedeploy() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: quadsync redeploy <name>")
+		os.Exit(2)
+	}
+	name := os.Args[2]
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("loading config: %v", err)
+	}
+
+	hashFile := filepath.Join(cfg.StateDir, "hashes", name)
+	if err := os.Remove(hashFile); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("no tracked deployment for %q", name)
+		}
+		log.Fatalf("removing hash: %v", err)
+	}
+	log.Printf("%s: marked for redeployment (run 'quadsync sync' to apply)", name)
 }
 
 func parentDirName(path string) string {

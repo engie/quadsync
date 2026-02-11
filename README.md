@@ -55,6 +55,7 @@ Only `QDEPLOY_GIT_URL` is required; the rest have defaults shown above.
 quadsync sync              Full reconcile (git-sync, merge, deploy)
 quadsync check <dir>       Validate .container files
 quadsync augment <file>    Print merged result to stdout
+quadsync redeploy <name>   Force redeployment on next sync
 ```
 
 **sync** — performs the full reconciliation loop. Intended to run as a systemd timer or CI trigger.
@@ -62,6 +63,13 @@ quadsync augment <file>    Print merged result to stdout
 **check** — validates `.container` files in a directory. Checks that filenames are valid Linux usernames (`[a-z][a-z0-9-]*`, max 32 chars) and that each file has a `[Container]` section with `Image=`. Useful as a CI pre-merge check.
 
 **augment** — previews the result of merging a `.container` file with its matching transform, printing the merged output to stdout.
+
+**redeploy** — clears the stored content hash for a service so that the next `sync` rewrites its quadlet and restarts it, even if the spec hasn't changed. Useful after manual changes to transforms, host config, or to recover a service whose quadlet was deleted.
+
+```bash
+quadsync redeploy myapp          # mark for redeployment
+quadsync sync                    # apply immediately (or wait for the timer)
+```
 
 ## Container repo layout
 
