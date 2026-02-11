@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -131,7 +132,14 @@ func Sync(config Config) error {
 	// it as a warning but do not count it as a quadsync failure.
 	var errs []error
 
-	for name, content := range desired {
+	names := make([]string, 0, len(desired))
+	for name := range desired {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		content := desired[name]
 		if !currentSet[name] {
 			log.Printf("creating user %s", name)
 			if err := createUser(name, config.UserGroup); err != nil {
