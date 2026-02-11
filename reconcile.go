@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // Config holds the deployer configuration.
@@ -77,6 +78,16 @@ func Sync(config Config) error {
 	// Ensure state dir exists
 	if err := os.MkdirAll(config.StateDir, 0755); err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
+	}
+
+	// Acquire exclusive lock to prevent overlapping sync runs.
+	lockFile, err := os.OpenFile(filepath.Join(config.StateDir, "sync.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("opening lock file: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("another sync is already running")
 	}
 
 	// 1. Git sync
