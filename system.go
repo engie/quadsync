@@ -124,21 +124,44 @@ func waitForUserManager(name string) error {
 
 // deleteUser stops services and removes a user.
 func deleteUser(name string) error {
-	// Disable linger
+	// Disable linger so logind won't restart the user manager.
 	if _, err := run(defaultTimeout, "loginctl", "disable-linger", name); err != nil {
 		log.Printf("warning: disable-linger %s: %v", name, err)
 	}
-	// Stop user slice
-	uidStr, err := run(shortTimeout, "id", "-u", name)
-	if err == nil {
-		uid := strings.TrimSpace(uidStr)
-		if _, err := run(systemdTimeout, "systemctl", "stop", "user-"+uid+".slice"); err != nil {
-			log.Printf("warning: stop user slice %s: %v", name, err)
-		}
+	// Terminate all sessions, stop the user manager, clean up /run/user/<uid>.
+	// This is synchronous — it waits for the user runtime to be fully torn down.
+	if _, err := run(systemdTimeout, "loginctl", "terminate-user", name); err != nil {
+		log.Printf("warning: terminate-user %s: %v", name, err)
 	}
-	// Remove user and home
-	_, err = run(defaultTimeout, "userdel", "-r", name)
-	return err
+	// Remove user and home, retrying on transient "busy" from kernel-level
+	// cleanup that outlasts the logind teardown.
+	return userdelRetry(name)
+}
+
+// userdelRetry runs userdel -r with bounded retries for transient errors
+// caused by teardown races (processes still exiting, directory still busy).
+func userdelRetry(name string) error {
+	const maxAttempts = 4
+	for i := 0; i < maxAttempts; i++ {
+		out, err := run(defaultTimeout, "userdel", "-r", name)
+		if err == nil {
+			return nil
+		}
+		if i == maxAttempts-1 || !userdellTransient(out) {
+			return err
+		}
+		log.Printf("userdel %s: transient error, retrying (%d/%d): %s",
+			name, i+1, maxAttempts-1, strings.TrimSpace(out))
+		time.Sleep(2 * time.Second)
+	}
+	return nil // unreachable
+}
+
+// userdellTransient returns true if userdel output indicates a transient
+// teardown race that may resolve on retry.
+func userdellTransient(output string) bool {
+	return strings.Contains(output, "busy") ||
+		strings.Contains(output, "currently used by process")
 }
 
 // writeQuadlet writes a .container file to the user's quadlet directory.
