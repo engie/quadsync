@@ -264,6 +264,7 @@ func loadTransforms(dir string) (map[string]*INIFile, error) {
 // buildDesired scans the repo and builds the desired state map.
 func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]string, error) {
 	desired := map[string]string{}
+	sources := map[string]string{} // name → source path (for collision detection)
 
 	// Root-level .container files — no transform
 	rootFiles, err := filepath.Glob(filepath.Join(repoPath, "*.container"))
@@ -277,6 +278,7 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 			return nil, fmt.Errorf("reading %s: %w", f, err)
 		}
 		desired[name] = string(data)
+		sources[name] = f
 	}
 
 	// Subdirectories — apply matching transform
@@ -301,6 +303,9 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 		}
 		for _, f := range subFiles {
 			name := strings.TrimSuffix(filepath.Base(f), ".container")
+			if prev, exists := sources[name]; exists {
+				return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
+			}
 			data, err := os.ReadFile(f)
 			if err != nil {
 				return nil, fmt.Errorf("reading %s: %w", f, err)
@@ -311,6 +316,7 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 			}
 			merged := MergeTransform(spec, transform)
 			desired[name] = merged.String()
+			sources[name] = f
 		}
 	}
 
