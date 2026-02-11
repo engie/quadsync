@@ -69,10 +69,19 @@ func parseEnvFile(data string) map[string]string {
 		if idx := strings.Index(line, "="); idx >= 0 {
 			key := strings.TrimSpace(line[:idx])
 			value := strings.TrimSpace(line[idx+1:])
+			value = unquote(value)
 			env[key] = value
 		}
 	}
 	return env
+}
+
+// unquote strips matched single or double quotes from a value.
+func unquote(s string) string {
+	if len(s) >= 2 && (s[0] == '"' && s[len(s)-1] == '"' || s[0] == '\'' && s[len(s)-1] == '\'') {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // Sync performs the full reconciliation: git sync, transform merge, deploy, cleanup.

@@ -3,9 +3,72 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestParseEnvFile(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want map[string]string
+	}{
+		{
+			name: "plain values",
+			data: "FOO=bar\nBAZ=qux",
+			want: map[string]string{"FOO": "bar", "BAZ": "qux"},
+		},
+		{
+			name: "double quoted",
+			data: `KEY="hello world"`,
+			want: map[string]string{"KEY": "hello world"},
+		},
+		{
+			name: "single quoted",
+			data: `KEY='hello world'`,
+			want: map[string]string{"KEY": "hello world"},
+		},
+		{
+			name: "quotes with surrounding whitespace",
+			data: `KEY = "hello world" `,
+			want: map[string]string{"KEY": "hello world"},
+		},
+		{
+			name: "mismatched quotes left alone",
+			data: `KEY="hello'`,
+			want: map[string]string{"KEY": `"hello'`},
+		},
+		{
+			name: "comments and blanks",
+			data: "# comment\n\nFOO=bar\n  # another\nBAZ=qux",
+			want: map[string]string{"FOO": "bar", "BAZ": "qux"},
+		},
+		{
+			name: "empty value",
+			data: "KEY=",
+			want: map[string]string{"KEY": ""},
+		},
+		{
+			name: "quoted empty value",
+			data: `KEY=""`,
+			want: map[string]string{"KEY": ""},
+		},
+		{
+			name: "value with equals sign",
+			data: "KEY=a=b=c",
+			want: map[string]string{"KEY": "a=b=c"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseEnvFile(tt.data)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestBuildDesiredDuplicateStem(t *testing.T) {
 	dir := t.TempDir()
