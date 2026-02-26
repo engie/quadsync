@@ -12,6 +12,20 @@ import (
 	"syscall"
 )
 
+// CompanionTemplate is an additional quadlet file template deployed alongside
+// each container. The SuffixAndExt (e.g. "-data.volume") is appended to the
+// container name to form the filename, and {{.Name}} in Content is replaced
+// with the container name.
+type CompanionTemplate struct {
+	SuffixAndExt string // e.g. "-litestream.container", "-data.volume"
+	Content      string // raw content with {{.Name}} placeholders
+}
+
+// DesiredState holds all quadlet files for a single container user.
+type DesiredState struct {
+	Files map[string]string // filename → content (e.g. "myapp.container", "myapp-data.volume")
+}
+
 // Config holds the deployer configuration.
 type Config struct {
 	GitURL       string
@@ -134,13 +148,13 @@ func Sync(config Config) error {
 	}
 
 	// 3. Load transforms
-	base, transforms, err := loadTransforms(config.TransformDir)
+	base, transforms, companions, err := loadTransforms(config.TransformDir)
 	if err != nil {
 		return fmt.Errorf("loading transforms: %w", err)
 	}
 
 	// 4. Build desired state
-	desired, err := buildDesired(config.RepoPath, base, transforms)
+	desired, err := buildDesired(config.RepoPath, base, transforms, companions)
 	if err != nil {
 		return fmt.Errorf("building desired state: %w", err)
 	}
@@ -174,7 +188,7 @@ func Sync(config Config) error {
 	sort.Strings(names)
 
 	for _, name := range names {
-		content := desired[name]
+		state := desired[name]
 		if !currentSet[name] {
 			log.Printf("creating user %s", name)
 			if err := createUser(name, config.UserGroup); err != nil {
@@ -184,15 +198,27 @@ func Sync(config Config) error {
 			}
 		}
 
-		if !specChanged(hashDir, name, content) {
+		if !specChanged(hashDir, name, state) {
 			log.Printf("%s: unchanged, skipping", name)
 			continue
 		}
 
 		log.Printf("%s: deploying", name)
-		if err := writeQuadlet(name, name, content); err != nil {
-			log.Printf("error writing quadlet for %s: %v", name, err)
-			errs = append(errs, fmt.Errorf("writing quadlet for %s: %w", name, err))
+		failed := false
+		for filename, content := range state.Files {
+			if err := writeQuadletFile(name, filename, content); err != nil {
+				log.Printf("error writing %s for %s: %v", filename, name, err)
+				errs = append(errs, fmt.Errorf("writing %s for %s: %w", filename, name, err))
+				failed = true
+				break
+			}
+		}
+		if failed {
+			continue
+		}
+		if err := chownQuadletDir(name); err != nil {
+			log.Printf("error chowning quadlet dir for %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("chowning quadlet dir for %s: %w", name, err))
 			continue
 		}
 		if err := waitForUserManager(name); err != nil {
@@ -208,7 +234,7 @@ func Sync(config Config) error {
 
 		// Quadlet is written and systemd knows about it — quadsync's job
 		// is done. Persist the hash so we don't re-deploy next cycle.
-		saveHash(hashDir, name, content)
+		saveHash(hashDir, name, state)
 
 		// Best-effort service restart. If the container fails to come up
 		// that is the container's concern, not ours.
@@ -224,8 +250,8 @@ func Sync(config Config) error {
 			if err := stopService(name, name); err != nil {
 				log.Printf("warning: stopping %s: %v", name, err)
 			}
-			if err := removeQuadlet(name, name); err != nil {
-				log.Printf("warning: removing quadlet for %s: %v", name, err)
+			if err := removeAllQuadlets(name); err != nil {
+				log.Printf("warning: removing quadlets for %s: %v", name, err)
 			}
 			if err := deleteUser(name); err != nil {
 				log.Printf("error deleting user %s: %v", name, err)
@@ -238,48 +264,75 @@ func Sync(config Config) error {
 	return errors.Join(errs...)
 }
 
-// loadTransforms reads all .container files from the transform directory.
-// Returns a base transform (from _base.container, may be nil) and a map of
-// directory name → parsed INI for directory-specific transforms.
-func loadTransforms(dir string) (*INIFile, map[string]*INIFile, error) {
+// loadTransforms reads all files from the transform directory.
+// Returns a base transform (from _base.container, may be nil), a map of
+// directory name → parsed INI for directory-specific transforms, and a list
+// of companion templates (files matching _base-<suffix>.<ext>).
+func loadTransforms(dir string) (*INIFile, map[string]*INIFile, []CompanionTemplate, error) {
 	var base *INIFile
 	transforms := map[string]*INIFile{}
+	var companions []CompanionTemplate
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, transforms, nil
+			return nil, transforms, nil, nil
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".container") {
+		if entry.IsDir() {
 			continue
 		}
-		name := strings.TrimSuffix(entry.Name(), ".container")
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, nil, fmt.Errorf("reading transform %s: %w", entry.Name(), err)
-		}
-		f, err := ParseINI(strings.NewReader(string(data)))
-		if err != nil {
-			return nil, nil, fmt.Errorf("parsing transform %s: %w", entry.Name(), err)
-		}
-		if name == "_base" {
+		name := entry.Name()
+
+		if name == "_base.container" {
+			// Base transform — merged into every .container
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("reading transform %s: %w", name, err)
+			}
+			f, err := ParseINI(strings.NewReader(string(data)))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("parsing transform %s: %w", name, err)
+			}
 			base = f
+		} else if strings.HasPrefix(name, "_base-") {
+			// Companion template — deployed as <name><suffix>.<ext>
+			suffixAndExt := strings.TrimPrefix(name, "_base")
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("reading companion %s: %w", name, err)
+			}
+			companions = append(companions, CompanionTemplate{
+				SuffixAndExt: suffixAndExt,
+				Content:      string(data),
+			})
+		} else if strings.HasSuffix(name, ".container") {
+			// Directory-specific transform
+			dirName := strings.TrimSuffix(name, ".container")
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("reading transform %s: %w", name, err)
+			}
+			f, err := ParseINI(strings.NewReader(string(data)))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("parsing transform %s: %w", name, err)
+			}
+			transforms[dirName] = f
 		} else {
-			transforms[name] = f
+			return nil, nil, nil, fmt.Errorf("unexpected file in transform directory: %s", name)
 		}
 	}
 
-	return base, transforms, nil
+	return base, transforms, companions, nil
 }
 
 // buildDesired scans the repo and builds the desired state map.
 // base is the optional base transform applied to all containers.
-func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile) (map[string]string, error) {
-	desired := map[string]string{}
+func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile, companions []CompanionTemplate) (map[string]DesiredState, error) {
+	desired := map[string]DesiredState{}
 	sources := map[string]string{} // name → source path (for collision detection)
 
 	// Root-level .container files — base transform only
@@ -293,15 +346,17 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", f, err)
 		}
+		var content string
 		if base != nil {
 			spec, err := ParseINI(strings.NewReader(string(data)))
 			if err != nil {
 				return nil, fmt.Errorf("parsing %s: %w", f, err)
 			}
-			desired[name] = applyTransforms(spec, []*INIFile{base}).String()
+			content = applyTransforms(spec, []*INIFile{base}).String()
 		} else {
-			desired[name] = string(data)
+			content = string(data)
 		}
+		desired[name] = buildDesiredState(name, content, companions)
 		sources[name] = f
 	}
 
@@ -342,7 +397,8 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 				tList = append(tList, base)
 			}
 			tList = append(tList, transform)
-			desired[name] = applyTransforms(spec, tList).String()
+			content := applyTransforms(spec, tList).String()
+			desired[name] = buildDesiredState(name, content, companions)
 			sources[name] = f
 		}
 	}
@@ -350,22 +406,44 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 	return desired, nil
 }
 
-func specChanged(hashDir, name, content string) bool {
+// buildDesiredState creates a DesiredState for a container, including its
+// main .container file and any companion files from templates.
+func buildDesiredState(name, containerContent string, companions []CompanionTemplate) DesiredState {
+	files := map[string]string{name + ".container": containerContent}
+	for _, c := range companions {
+		filename := name + c.SuffixAndExt
+		content := strings.ReplaceAll(c.Content, "{{.Name}}", name)
+		files[filename] = content
+	}
+	return DesiredState{Files: files}
+}
+
+func specChanged(hashDir, name string, state DesiredState) bool {
 	hashFile := filepath.Join(hashDir, name)
 	existing, err := os.ReadFile(hashFile)
 	if err != nil {
 		return true // file doesn't exist, treat as changed
 	}
-	newHash := sha256Hex(content)
-	return strings.TrimSpace(string(existing)) != newHash
+	return strings.TrimSpace(string(existing)) != compositeHash(state)
 }
 
-func saveHash(hashDir, name, content string) {
+func saveHash(hashDir, name string, state DesiredState) {
 	hashFile := filepath.Join(hashDir, name)
-	os.WriteFile(hashFile, []byte(sha256Hex(content)), 0644)
+	os.WriteFile(hashFile, []byte(compositeHash(state)), 0644)
 }
 
-func sha256Hex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h)
+// compositeHash computes a single hash over all files in a DesiredState,
+// sorted by filename for determinism.
+func compositeHash(state DesiredState) string {
+	h := sha256.New()
+	names := make([]string, 0, len(state.Files))
+	for n := range state.Files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		h.Write([]byte(n))
+		h.Write([]byte(state.Files[n]))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }

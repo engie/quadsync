@@ -92,7 +92,7 @@ func cmdAugment() {
 		log.Fatalf("loading config: %v", err)
 	}
 
-	base, transforms, err := loadTransforms(cfg.TransformDir)
+	base, transforms, _, err := loadTransforms(cfg.TransformDir)
 	if err != nil {
 		log.Fatalf("loading transforms: %v", err)
 	}

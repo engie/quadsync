@@ -93,7 +93,7 @@ func TestBuildDesiredDuplicateStem(t *testing.T) {
 	transform, _ := ParseINI(strings.NewReader("[Container]\n"))
 	transforms := map[string]*INIFile{"myhost": transform}
 
-	_, err := buildDesired(dir, nil, transforms)
+	_, err := buildDesired(dir, nil, transforms, nil)
 	if err == nil {
 		t.Fatal("expected error for duplicate stem, got nil")
 	}
@@ -124,7 +124,7 @@ func TestBuildDesiredNoDuplicate(t *testing.T) {
 	transform, _ := ParseINI(strings.NewReader("[Container]\n"))
 	transforms := map[string]*INIFile{"myhost": transform}
 
-	desired, err := buildDesired(dir, nil, transforms)
+	desired, err := buildDesired(dir, nil, transforms, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

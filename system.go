@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -164,8 +165,10 @@ func userdellTransient(output string) bool {
 		strings.Contains(output, "currently used by process")
 }
 
-// writeQuadlet writes a .container file to the user's quadlet directory.
-func writeQuadlet(username, containerName, content string) error {
+// writeQuadletFile writes a single quadlet file to the user's quadlet directory.
+// filename is the complete filename (e.g. "myapp.container", "myapp-data.volume").
+// Call chownQuadletDir after writing all files for a user.
+func writeQuadletFile(username, filename, content string) error {
 	home, err := userHome(username)
 	if err != nil {
 		return err
@@ -174,26 +177,47 @@ func writeQuadlet(username, containerName, content string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating quadlet dir: %w", err)
 	}
-	path := filepath.Join(dir, containerName+".container")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	path := filepath.Join(dir, filename)
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// chownQuadletDir chowns the .config tree to the user. Podman refuses to run
+// if any parent directory is not owned by the container user.
+func chownQuadletDir(username string) error {
+	home, err := userHome(username)
+	if err != nil {
 		return err
 	}
-	// chown the entire .config tree to the user — Podman refuses to run
-	// if any parent directory is not owned by the container user.
 	if _, err := run(defaultTimeout, "chown", "-R", username+":"+username, filepath.Join(home, ".config")); err != nil {
 		return fmt.Errorf("chowning .config for %s: %w", username, err)
 	}
 	return nil
 }
 
-// removeQuadlet removes a .container file from the user's quadlet directory.
-func removeQuadlet(username, containerName string) error {
+// removeAllQuadlets removes all files from the user's quadlet directory.
+// quadsync owns this directory, so clearing it on user removal is correct.
+func removeAllQuadlets(username string) error {
 	home, err := userHome(username)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".config", "containers", "systemd", containerName+".container")
-	return os.Remove(path)
+	dir := filepath.Join(home, ".config", "containers", "systemd")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // runUserM runs "systemctl --user -M <user>@" with inherited stdout/stderr.
