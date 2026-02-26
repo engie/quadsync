@@ -194,6 +194,37 @@ func chownQuadletDir(username string) error {
 	return nil
 }
 
+// cleanStaleQuadlets removes any files from the user's quadlet directory
+// that are not in the desired set. This handles companion templates being
+// removed from the transform directory.
+func cleanStaleQuadlets(username string, desired map[string]string) error {
+	home, err := userHome(username)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".config", "containers", "systemd")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := desired[entry.Name()]; !ok {
+			log.Printf("removing stale quadlet file %s for %s", entry.Name(), username)
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // removeAllQuadlets removes all files from the user's quadlet directory.
 // quadsync owns this directory, so clearing it on user removal is correct.
 func removeAllQuadlets(username string) error {
