@@ -216,11 +216,6 @@ func Sync(config Config) error {
 		if failed {
 			continue
 		}
-		if err := cleanStaleQuadlets(name, state.Files); err != nil {
-			log.Printf("error cleaning stale quadlets for %s: %v", name, err)
-			errs = append(errs, fmt.Errorf("cleaning stale quadlets for %s: %w", name, err))
-			continue
-		}
 		if err := chownQuadletDir(name); err != nil {
 			log.Printf("error chowning quadlet dir for %s: %v", name, err)
 			errs = append(errs, fmt.Errorf("chowning quadlet dir for %s: %w", name, err))
