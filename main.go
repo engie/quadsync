@@ -92,7 +92,7 @@ func cmdAugment() {
 		log.Fatalf("loading config: %v", err)
 	}
 
-	transforms, err := loadTransforms(cfg.TransformDir)
+	base, transforms, err := loadTransforms(cfg.TransformDir)
 	if err != nil {
 		log.Fatalf("loading transforms: %v", err)
 	}
@@ -100,14 +100,20 @@ func cmdAugment() {
 	// Determine which transform to apply based on the file's parent directory
 	// If it's in a subdirectory that has a matching transform, apply it
 	dir := parentDirName(filePath)
-	transform, ok := transforms[dir]
-	if !ok {
-		// No transform, print as-is
+	var tList []*INIFile
+	if base != nil {
+		tList = append(tList, base)
+	}
+	if transform, ok := transforms[dir]; ok {
+		tList = append(tList, transform)
+	}
+	if len(tList) == 0 {
+		// No transforms, print as-is
 		fmt.Print(spec.String())
 		return
 	}
 
-	merged := MergeTransform(spec, transform)
+	merged := applyTransforms(spec, tList)
 	fmt.Print(merged.String())
 }
 

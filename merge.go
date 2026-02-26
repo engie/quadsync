@@ -99,6 +99,15 @@ func sectionHasKey(sec Section, key string) bool {
 	return false
 }
 
+// applyTransforms chains multiple transforms onto a spec.
+// Each transform is applied in order via MergeTransform.
+func applyTransforms(spec *INIFile, transforms []*INIFile) *INIFile {
+	for _, t := range transforms {
+		spec = MergeTransform(spec, t)
+	}
+	return spec
+}
+
 func cloneSection(s Section) Section {
 	c := Section{Name: s.Name, Entries: make([]Entry, len(s.Entries))}
 	copy(c.Entries, s.Entries)

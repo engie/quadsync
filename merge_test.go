@@ -231,6 +231,116 @@ Restart=on-failure
 	}
 }
 
+func TestApplyTransformsNone(t *testing.T) {
+	spec := parseINI(t, `[Container]
+Image=nginx:latest
+
+[Install]
+WantedBy=default.target
+`)
+
+	result := applyTransforms(spec, nil)
+	if result.String() != spec.String() {
+		t.Errorf("applyTransforms with no transforms should be identity:\n--- expected ---\n%s\n--- got ---\n%s", spec.String(), result.String())
+	}
+}
+
+func TestApplyTransformsBaseOnly(t *testing.T) {
+	spec := parseINI(t, `[Container]
+Image=nginx:latest
+
+[Install]
+WantedBy=default.target
+`)
+
+	base := parseINI(t, `[Unit]
+After=mnt-storage.mount
+Requires=mnt-storage.mount
+
+[Service]
++ExecStartPre=sudo /usr/local/bin/storage-init %N
+
+[Container]
++Volume=/mnt/storage/%N:/data
+`)
+
+	result := applyTransforms(spec, []*INIFile{base})
+	output := result.String()
+
+	if !strings.Contains(output, "After=mnt-storage.mount") {
+		t.Error("base Unit section should be added")
+	}
+	if !strings.Contains(output, "ExecStartPre=sudo /usr/local/bin/storage-init %N") {
+		t.Error("base ExecStartPre should be added")
+	}
+	if !strings.Contains(output, "Volume=/mnt/storage/%N:/data") {
+		t.Error("base Volume should be prepended")
+	}
+	if !strings.Contains(output, "Image=nginx:latest") {
+		t.Error("spec Image should be preserved")
+	}
+}
+
+func TestApplyTransformsBaseAndDir(t *testing.T) {
+	spec := parseINI(t, `[Container]
+Image=nginx:latest
+
+[Service]
+Environment=FOO=bar
+`)
+
+	base := parseINI(t, `[Unit]
+After=mnt-storage.mount
+Requires=mnt-storage.mount
+
+[Service]
++ExecStartPre=sudo /usr/local/bin/storage-init %N
+
+[Container]
++Volume=/mnt/storage/%N:/data
+`)
+
+	dirTransform := parseINI(t, `[Unit]
+After=network-online.target
+
+[Container]
+Network=slirp4netns
+
+[Service]
+Restart=on-failure
+`)
+
+	result := applyTransforms(spec, []*INIFile{base, dirTransform})
+	output := result.String()
+
+	// Base additions
+	if !strings.Contains(output, "After=mnt-storage.mount") {
+		t.Error("base After should be present")
+	}
+	if !strings.Contains(output, "Volume=/mnt/storage/%N:/data") {
+		t.Error("base Volume should be present")
+	}
+	if !strings.Contains(output, "ExecStartPre=sudo /usr/local/bin/storage-init %N") {
+		t.Error("base ExecStartPre should be present")
+	}
+
+	// Dir transform additions
+	if !strings.Contains(output, "Network=slirp4netns") {
+		t.Error("dir transform Network should be added")
+	}
+	if !strings.Contains(output, "Restart=on-failure") {
+		t.Error("dir transform Restart should be added")
+	}
+
+	// Spec preserved
+	if !strings.Contains(output, "Image=nginx:latest") {
+		t.Error("spec Image should be preserved")
+	}
+	if !strings.Contains(output, "Environment=FOO=bar") {
+		t.Error("spec Environment should be preserved")
+	}
+}
+
 func TestMergeNoTransform(t *testing.T) {
 	spec := parseINI(t, `[Container]
 Image=nginx:latest

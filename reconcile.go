@@ -134,13 +134,13 @@ func Sync(config Config) error {
 	}
 
 	// 3. Load transforms
-	transforms, err := loadTransforms(config.TransformDir)
+	base, transforms, err := loadTransforms(config.TransformDir)
 	if err != nil {
 		return fmt.Errorf("loading transforms: %w", err)
 	}
 
 	// 4. Build desired state
-	desired, err := buildDesired(config.RepoPath, transforms)
+	desired, err := buildDesired(config.RepoPath, base, transforms)
 	if err != nil {
 		return fmt.Errorf("building desired state: %w", err)
 	}
@@ -239,16 +239,18 @@ func Sync(config Config) error {
 }
 
 // loadTransforms reads all .container files from the transform directory.
-// Returns a map of directory name → parsed INI.
-func loadTransforms(dir string) (map[string]*INIFile, error) {
+// Returns a base transform (from _base.container, may be nil) and a map of
+// directory name → parsed INI for directory-specific transforms.
+func loadTransforms(dir string) (*INIFile, map[string]*INIFile, error) {
+	var base *INIFile
 	transforms := map[string]*INIFile{}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return transforms, nil
+			return nil, transforms, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	for _, entry := range entries {
@@ -258,24 +260,29 @@ func loadTransforms(dir string) (map[string]*INIFile, error) {
 		name := strings.TrimSuffix(entry.Name(), ".container")
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("reading transform %s: %w", entry.Name(), err)
+			return nil, nil, fmt.Errorf("reading transform %s: %w", entry.Name(), err)
 		}
 		f, err := ParseINI(strings.NewReader(string(data)))
 		if err != nil {
-			return nil, fmt.Errorf("parsing transform %s: %w", entry.Name(), err)
+			return nil, nil, fmt.Errorf("parsing transform %s: %w", entry.Name(), err)
 		}
-		transforms[name] = f
+		if name == "_base" {
+			base = f
+		} else {
+			transforms[name] = f
+		}
 	}
 
-	return transforms, nil
+	return base, transforms, nil
 }
 
 // buildDesired scans the repo and builds the desired state map.
-func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]string, error) {
+// base is the optional base transform applied to all containers.
+func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile) (map[string]string, error) {
 	desired := map[string]string{}
 	sources := map[string]string{} // name → source path (for collision detection)
 
-	// Root-level .container files — no transform
+	// Root-level .container files — base transform only
 	rootFiles, err := filepath.Glob(filepath.Join(repoPath, "*.container"))
 	if err != nil {
 		return nil, err
@@ -286,11 +293,19 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", f, err)
 		}
-		desired[name] = string(data)
+		if base != nil {
+			spec, err := ParseINI(strings.NewReader(string(data)))
+			if err != nil {
+				return nil, fmt.Errorf("parsing %s: %w", f, err)
+			}
+			desired[name] = applyTransforms(spec, []*INIFile{base}).String()
+		} else {
+			desired[name] = string(data)
+		}
 		sources[name] = f
 	}
 
-	// Subdirectories — apply matching transform
+	// Subdirectories — apply base + matching transform
 	entries, err := os.ReadDir(repoPath)
 	if err != nil {
 		return nil, err
@@ -322,8 +337,12 @@ func buildDesired(repoPath string, transforms map[string]*INIFile) (map[string]s
 			if err != nil {
 				return nil, fmt.Errorf("parsing %s: %w", f, err)
 			}
-			merged := MergeTransform(spec, transform)
-			desired[name] = merged.String()
+			var tList []*INIFile
+			if base != nil {
+				tList = append(tList, base)
+			}
+			tList = append(tList, transform)
+			desired[name] = applyTransforms(spec, tList).String()
 			sources[name] = f
 		}
 	}
