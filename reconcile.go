@@ -338,11 +338,12 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 	desired := map[string]DesiredState{}
 	sources := map[string]string{} // name → source path (for collision detection)
 
-	// Root-level .container files — base transform only
-	rootFiles, err := filepath.Glob(filepath.Join(repoPath, "*.container"))
+	rootFiles, subdirFiles, err := discoverContainers(repoPath)
 	if err != nil {
 		return nil, err
 	}
+
+	// Root-level .container files — base transform only
 	for _, f := range rootFiles {
 		name := strings.TrimSuffix(filepath.Base(f), ".container")
 		data, err := os.ReadFile(f)
@@ -364,25 +365,13 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 	}
 
 	// Subdirectories — apply base + matching transform
-	entries, err := os.ReadDir(repoPath)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		dirName := entry.Name()
+	for dirName, files := range subdirFiles {
 		transform, ok := transforms[dirName]
 		if !ok {
 			return nil, fmt.Errorf("no transform for directory %s", dirName)
 		}
 
-		subFiles, err := filepath.Glob(filepath.Join(repoPath, dirName, "*.container"))
-		if err != nil {
-			return nil, err
-		}
-		for _, f := range subFiles {
+		for _, f := range files {
 			name := strings.TrimSuffix(filepath.Base(f), ".container")
 			if prev, exists := sources[name]; exists {
 				return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
