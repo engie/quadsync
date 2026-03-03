@@ -49,6 +49,18 @@ func TestCompanionNameSubstitution(t *testing.T) {
 	}
 }
 
+func TestContainerContentNameSubstitution(t *testing.T) {
+	state := buildDesiredState("myapp", "[Container]\nImage=myapp\nVolume={{.Name}}-data.volume:/data\n", nil)
+
+	content := state.Files["myapp.container"]
+	if strings.Contains(content, "{{.Name}}") {
+		t.Errorf("{{.Name}} not replaced in container content: %s", content)
+	}
+	if !strings.Contains(content, "Volume=myapp-data.volume:/data") {
+		t.Errorf("expected substituted volume, got: %s", content)
+	}
+}
+
 func TestCompositeHash(t *testing.T) {
 	state1 := DesiredState{Files: map[string]string{
 		"app.container":  "[Container]\nImage=app\n",

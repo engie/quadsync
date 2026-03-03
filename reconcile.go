@@ -409,6 +409,7 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 // buildDesiredState creates a DesiredState for a container, including its
 // main .container file and any companion files from templates.
 func buildDesiredState(name, containerContent string, companions []CompanionTemplate) DesiredState {
+	containerContent = strings.ReplaceAll(containerContent, "{{.Name}}", name)
 	files := map[string]string{name + ".container": containerContent}
 	for _, c := range companions {
 		filename := name + c.SuffixAndExt
