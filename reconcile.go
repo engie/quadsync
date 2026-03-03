@@ -234,7 +234,10 @@ func Sync(config Config) error {
 
 		// Quadlet is written and systemd knows about it — quadsync's job
 		// is done. Persist the hash so we don't re-deploy next cycle.
-		saveHash(hashDir, name, state)
+		if err := saveHash(hashDir, name, state); err != nil {
+			log.Printf("error saving hash for %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("saving hash for %s: %w", name, err))
+		}
 
 		// Best-effort service restart. If the container fails to come up
 		// that is the container's concern, not ours.
@@ -427,9 +430,9 @@ func specChanged(hashDir, name string, state DesiredState) bool {
 	return strings.TrimSpace(string(existing)) != compositeHash(state)
 }
 
-func saveHash(hashDir, name string, state DesiredState) {
+func saveHash(hashDir, name string, state DesiredState) error {
 	hashFile := filepath.Join(hashDir, name)
-	os.WriteFile(hashFile, []byte(compositeHash(state)), 0644)
+	return os.WriteFile(hashFile, []byte(compositeHash(state)), 0644)
 }
 
 // compositeHash computes a single hash over all files in a DesiredState,
