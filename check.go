@@ -83,27 +83,52 @@ func checkFile(path string) []error {
 		return []error{fmt.Errorf("%s: %w", path, err)}
 	}
 
-	f, err := ParseINI(strings.NewReader(string(data)))
+	errs = append(errs, checkContent(name, string(data), path)...)
+	return errs
+}
+
+// checkContent validates parsed INI content for a .container file.
+// source is a human-readable label for error messages.
+func checkContent(name, content, source string) []error {
+	var errs []error
+
+	f, err := ParseINI(strings.NewReader(content))
 	if err != nil {
-		return []error{fmt.Errorf("%s: parse error: %w", path, err)}
+		return []error{fmt.Errorf("%s: parse error: %w", source, err)}
 	}
 
 	// Must have [Container] section with Image=
 	container := f.GetSection("Container")
 	if container == nil {
-		errs = append(errs, fmt.Errorf("%s: missing [Container] section", path))
+		errs = append(errs, fmt.Errorf("%s: missing [Container] section", source))
 	} else if !container.HasKey("Image") {
-		errs = append(errs, fmt.Errorf("%s: missing Image= in [Container]", path))
+		errs = append(errs, fmt.Errorf("%s: missing Image= in [Container]", source))
 	}
 
 	// If ContainerName is set, it must match the filename stem
 	if container != nil {
 		for _, e := range container.Entries {
 			if e.Key == "ContainerName" && e.Value != name {
-				errs = append(errs, fmt.Errorf("%s: ContainerName=%s does not match filename stem %s", path, e.Value, name))
+				errs = append(errs, fmt.Errorf("%s: ContainerName=%s does not match filename stem %s", source, e.Value, name))
 			}
 		}
 	}
 
+	return errs
+}
+
+// CheckDesired validates the .container file in each DesiredState entry.
+// Companion files (.volume etc.) are not validated as container specs.
+func CheckDesired(desired map[string]DesiredState) []error {
+	var errs []error
+	for name, state := range desired {
+		containerFile := name + ".container"
+		content, ok := state.Files[containerFile]
+		if !ok {
+			continue
+		}
+		source := fmt.Sprintf("merged output for %s", name)
+		errs = append(errs, checkContent(name, content, source)...)
+	}
 	return errs
 }

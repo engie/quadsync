@@ -159,7 +159,15 @@ func Sync(config Config) error {
 		return fmt.Errorf("building desired state: %w", err)
 	}
 
-	// 5. Get current managed users
+	// 5. Validate merged output
+	if errs := CheckDesired(desired); len(errs) > 0 {
+		for _, e := range errs {
+			log.Printf("post-merge validation error: %v", e)
+		}
+		return fmt.Errorf("post-merge validation failed: %d error(s)", len(errs))
+	}
+
+	// 6. Get current managed users
 	current, err := managedUsers(config.UserGroup)
 	if err != nil {
 		return fmt.Errorf("listing managed users: %w", err)
@@ -169,7 +177,7 @@ func Sync(config Config) error {
 		currentSet[u] = true
 	}
 
-	// 6. Deploy
+	// 7. Deploy
 	hashDir := filepath.Join(config.StateDir, "hashes")
 	if err := os.MkdirAll(hashDir, 0755); err != nil {
 		return fmt.Errorf("creating hash dir: %w", err)
@@ -246,7 +254,7 @@ func Sync(config Config) error {
 		}
 	}
 
-	// 7. Cleanup: remove containers not in desired
+	// 8. Cleanup: remove containers not in desired
 	for _, name := range current {
 		if _, exists := desired[name]; !exists {
 			log.Printf("%s: removing", name)

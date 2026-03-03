@@ -4,8 +4,91 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
+
+func TestCheckContent(t *testing.T) {
+	t.Run("valid content", func(t *testing.T) {
+		content := "[Container]\nImage=docker.io/library/nginx\n"
+		errs := checkContent("myapp", content, "test")
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	t.Run("missing Container section", func(t *testing.T) {
+		content := "[Service]\nRestart=always\n"
+		errs := checkContent("myapp", content, "test")
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %v", errs)
+		}
+		if !strings.Contains(errs[0].Error(), "missing [Container] section") {
+			t.Fatalf("unexpected error: %v", errs[0])
+		}
+	})
+
+	t.Run("missing Image", func(t *testing.T) {
+		content := "[Container]\nEnvironment=FOO=bar\n"
+		errs := checkContent("myapp", content, "test")
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %v", errs)
+		}
+		if !strings.Contains(errs[0].Error(), "missing Image=") {
+			t.Fatalf("unexpected error: %v", errs[0])
+		}
+	})
+
+	t.Run("ContainerName mismatch", func(t *testing.T) {
+		content := "[Container]\nImage=docker.io/library/nginx\nContainerName=other\n"
+		errs := checkContent("myapp", content, "test")
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %v", errs)
+		}
+		if !strings.Contains(errs[0].Error(), "ContainerName=other does not match") {
+			t.Fatalf("unexpected error: %v", errs[0])
+		}
+	})
+}
+
+func TestCheckDesired(t *testing.T) {
+	t.Run("valid desired state", func(t *testing.T) {
+		desired := map[string]DesiredState{
+			"myapp": {Files: map[string]string{
+				"myapp.container": "[Container]\nImage=docker.io/library/nginx\n",
+			}},
+		}
+		errs := CheckDesired(desired)
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	t.Run("broken container fails", func(t *testing.T) {
+		desired := map[string]DesiredState{
+			"myapp": {Files: map[string]string{
+				"myapp.container": "[Service]\nRestart=always\n",
+			}},
+		}
+		errs := CheckDesired(desired)
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %v", errs)
+		}
+	})
+
+	t.Run("companion files not validated as containers", func(t *testing.T) {
+		desired := map[string]DesiredState{
+			"myapp": {Files: map[string]string{
+				"myapp.container":  "[Container]\nImage=docker.io/library/nginx\n",
+				"myapp-data.volume": "[Volume]\nDriver=local\n",
+			}},
+		}
+		errs := CheckDesired(desired)
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+}
 
 func TestDiscoverContainers(t *testing.T) {
 	t.Run("root files", func(t *testing.T) {

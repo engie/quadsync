@@ -11,10 +11,12 @@ quadsync syncs `.container` files from a Git repo and deploys each one as a root
 **Sync workflow:**
 
 1. Clone or fetch the configured Git repository
-2. Load transform files from the transform directory
-3. Build desired state — root-level `.container` files are used as-is; files in subdirectories get merged with matching transforms
-4. For each container: create the Linux user if needed, skip if the content hash is unchanged, write the quadlet file, daemon-reload, and restart the service
-5. Clean up removed containers: stop the service, remove the quadlet, delete the user
+2. Validate raw `.container` files (filename, `[Container]` section, `Image=`)
+3. Load transform files from the transform directory
+4. Build desired state — root-level `.container` files are used as-is; files in subdirectories get merged with matching transforms
+5. Validate merged output (catches transforms that break a valid spec, e.g. removing `Image=`)
+6. For each container: create the Linux user if needed, skip if the content hash is unchanged, write the quadlet file, daemon-reload, and restart the service
+7. Clean up removed containers: stop the service, remove the quadlet, delete the user
 
 **Transforms** let you inject host-specific configuration (network settings, volume mounts, etc.) into container specs from subdirectories. Two merge rules:
 
@@ -60,7 +62,7 @@ quadsync redeploy <name>   Force redeployment on next sync
 
 **sync** — performs the full reconciliation loop. Intended to run as a systemd timer or CI trigger.
 
-**check** — validates `.container` files in a directory. Checks that filenames are valid Linux usernames (`[a-z][a-z0-9-]*`, max 32 chars) and that each file has a `[Container]` section with `Image=`. Useful as a CI pre-merge check.
+**check** — validates `.container` files in a directory. Checks that filenames are valid Linux usernames (`[a-z][a-z0-9-]*`, max 32 chars) and that each file has a `[Container]` section with `Image=`. Useful as a CI pre-merge check. Note: `sync` also runs these checks on both the raw inputs and the merged output, so invalid specs are caught before deployment even if `check` isn't run separately.
 
 **augment** — previews the result of merging a `.container` file with its matching transform, printing the merged output to stdout.
 
