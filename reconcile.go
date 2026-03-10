@@ -23,7 +23,8 @@ type CompanionTemplate struct {
 
 // DesiredState holds all quadlet files for a single container user.
 type DesiredState struct {
-	Files map[string]string // filename → content (e.g. "myapp.container", "myapp-data.volume")
+	Files       map[string]string // filename → content (e.g. "myapp.container", "myapp-data.volume")
+	ServiceName string            // systemd service to restart (e.g. "nginx-demo" for standalone, "webapp-pod" for pods)
 }
 
 // Config holds the deployer configuration.
@@ -148,13 +149,13 @@ func Sync(config Config) error {
 	}
 
 	// 3. Load transforms
-	base, transforms, companions, err := loadTransforms(config.TransformDir)
+	transforms, err := loadAllTransforms(config.TransformDir)
 	if err != nil {
 		return fmt.Errorf("loading transforms: %w", err)
 	}
 
 	// 4. Build desired state
-	desired, err := buildDesired(config.RepoPath, base, transforms, companions)
+	desired, err := buildDesiredFull(config.RepoPath, transforms)
 	if err != nil {
 		return fmt.Errorf("building desired state: %w", err)
 	}
@@ -249,7 +250,7 @@ func Sync(config Config) error {
 
 		// Best-effort service restart. If the container fails to come up
 		// that is the container's concern, not ours.
-		if err := restartService(name, name); err != nil {
+		if err := restartService(name, state.ServiceName); err != nil {
 			log.Printf("warning: restarting %s: %v (container may need attention)", name, err)
 		}
 	}
@@ -275,21 +276,40 @@ func Sync(config Config) error {
 	return errors.Join(errs...)
 }
 
+// Transforms holds all loaded transform data from the transform directory.
+type Transforms struct {
+	Base          *INIFile              // from _base.container, applied to all .container files
+	BasePod       *INIFile              // from _base.pod, applied to all .pod files
+	DirContainer  map[string]*INIFile   // directory-specific .container transforms
+	DirPod        map[string]*INIFile   // directory-specific .pod transforms
+	Companions    []CompanionTemplate
+}
+
 // loadTransforms reads all files from the transform directory.
 // Returns a base transform (from _base.container, may be nil), a map of
 // directory name → parsed INI for directory-specific transforms, and a list
 // of companion templates (files matching _base-<suffix>.<ext>).
 func loadTransforms(dir string) (*INIFile, map[string]*INIFile, []CompanionTemplate, error) {
-	var base *INIFile
-	transforms := map[string]*INIFile{}
-	var companions []CompanionTemplate
+	t, err := loadAllTransforms(dir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return t.Base, t.DirContainer, t.Companions, nil
+}
+
+// loadAllTransforms reads all files from the transform directory including pod transforms.
+func loadAllTransforms(dir string) (Transforms, error) {
+	t := Transforms{
+		DirContainer: map[string]*INIFile{},
+		DirPod:       map[string]*INIFile{},
+	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, transforms, nil, nil
+			return t, nil
 		}
-		return nil, nil, nil, err
+		return Transforms{}, err
 	}
 
 	for _, entry := range entries {
@@ -299,111 +319,308 @@ func loadTransforms(dir string) (*INIFile, map[string]*INIFile, []CompanionTempl
 		name := entry.Name()
 
 		if name == "_base.container" {
-			// Base transform — merged into every .container
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("reading transform %s: %w", name, err)
+				return Transforms{}, fmt.Errorf("reading transform %s: %w", name, err)
 			}
 			f, err := ParseINI(strings.NewReader(string(data)))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("parsing transform %s: %w", name, err)
+				return Transforms{}, fmt.Errorf("parsing transform %s: %w", name, err)
 			}
-			base = f
+			t.Base = f
+		} else if name == "_base.pod" {
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return Transforms{}, fmt.Errorf("reading transform %s: %w", name, err)
+			}
+			f, err := ParseINI(strings.NewReader(string(data)))
+			if err != nil {
+				return Transforms{}, fmt.Errorf("parsing transform %s: %w", name, err)
+			}
+			t.BasePod = f
 		} else if strings.HasPrefix(name, "_base-") {
-			// Companion template — deployed as <name><suffix>.<ext>
 			suffixAndExt := strings.TrimPrefix(name, "_base")
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("reading companion %s: %w", name, err)
+				return Transforms{}, fmt.Errorf("reading companion %s: %w", name, err)
 			}
-			companions = append(companions, CompanionTemplate{
+			t.Companions = append(t.Companions, CompanionTemplate{
 				SuffixAndExt: suffixAndExt,
 				Content:      string(data),
 			})
-		} else if strings.HasSuffix(name, ".container") {
-			// Directory-specific transform
-			dirName := strings.TrimSuffix(name, ".container")
+		} else if strings.HasSuffix(name, ".pod") {
+			dirName := strings.TrimSuffix(name, ".pod")
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("reading transform %s: %w", name, err)
+				return Transforms{}, fmt.Errorf("reading transform %s: %w", name, err)
 			}
 			f, err := ParseINI(strings.NewReader(string(data)))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("parsing transform %s: %w", name, err)
+				return Transforms{}, fmt.Errorf("parsing transform %s: %w", name, err)
 			}
-			transforms[dirName] = f
+			t.DirPod[dirName] = f
+		} else if strings.HasSuffix(name, ".container") {
+			dirName := strings.TrimSuffix(name, ".container")
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return Transforms{}, fmt.Errorf("reading transform %s: %w", name, err)
+			}
+			f, err := ParseINI(strings.NewReader(string(data)))
+			if err != nil {
+				return Transforms{}, fmt.Errorf("parsing transform %s: %w", name, err)
+			}
+			t.DirContainer[dirName] = f
 		} else {
-			return nil, nil, nil, fmt.Errorf("unexpected file in transform directory: %s", name)
+			return Transforms{}, fmt.Errorf("unexpected file in transform directory: %s", name)
 		}
 	}
 
-	return base, transforms, companions, nil
+	return t, nil
 }
 
 // buildDesired scans the repo and builds the desired state map.
 // base is the optional base transform applied to all containers.
 func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile, companions []CompanionTemplate) (map[string]DesiredState, error) {
+	t := Transforms{
+		Base:         base,
+		DirContainer: transforms,
+		DirPod:       map[string]*INIFile{},
+		Companions:   companions,
+	}
+	return buildDesiredFull(repoPath, t)
+}
+
+// buildDesiredFull scans the repo and builds the desired state map using full transforms.
+func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, error) {
 	desired := map[string]DesiredState{}
 	sources := map[string]string{} // name → source path (for collision detection)
 
-	rootFiles, subdirFiles, err := discoverContainers(repoPath)
+	rootContainers, rootPods, subdirSpecs, err := discoverContainers(repoPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Root-level .container files — base transform only
-	for _, f := range rootFiles {
+	// Build set of root pod stems to identify pod members
+	rootPodStems := map[string]string{} // stem → pod file path
+	for _, f := range rootPods {
+		stem := strings.TrimSuffix(filepath.Base(f), ".pod")
+		rootPodStems[stem] = f
+	}
+
+	// Group root containers by pod membership
+	rootStandalone := []string{}
+	rootPodMembers := map[string][]string{} // pod stem → member files
+	for _, f := range rootContainers {
 		name := strings.TrimSuffix(filepath.Base(f), ".container")
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", f, err)
-		}
-		var content string
-		if base != nil {
-			spec, err := ParseINI(strings.NewReader(string(data)))
-			if err != nil {
-				return nil, fmt.Errorf("parsing %s: %w", f, err)
+		memberOf := ""
+		for stem := range rootPodStems {
+			if strings.HasPrefix(name, stem+"-") {
+				memberOf = stem
+				break
 			}
-			content = applyTransforms(spec, []*INIFile{base}).String()
-		} else {
-			content = string(data)
 		}
-		desired[name] = buildDesiredState(name, content, companions)
+		if memberOf != "" {
+			rootPodMembers[memberOf] = append(rootPodMembers[memberOf], f)
+		} else {
+			rootStandalone = append(rootStandalone, f)
+		}
+	}
+
+	// Root-level standalone .container files — base transform only
+	for _, f := range rootStandalone {
+		name := strings.TrimSuffix(filepath.Base(f), ".container")
+		content, err := transformContainerFile(f, t.Base, nil)
+		if err != nil {
+			return nil, err
+		}
+		desired[name] = buildDesiredState(name, content, t.Companions)
 		sources[name] = f
 	}
 
-	// Subdirectories — apply base + matching transform
-	for dirName, files := range subdirFiles {
-		transform, ok := transforms[dirName]
-		if !ok {
-			return nil, fmt.Errorf("no transform for directory %s", dirName)
+	// Root-level pods
+	for stem, podFile := range rootPodStems {
+		if prev, exists := sources[stem]; exists {
+			return nil, fmt.Errorf("duplicate name %q: %s and %s", stem, prev, podFile)
+		}
+		members := rootPodMembers[stem]
+		state, err := buildPodDesired(stem, podFile, members, t, nil)
+		if err != nil {
+			return nil, err
+		}
+		desired[stem] = state
+		sources[stem] = podFile
+	}
+
+	// Subdirectories
+	for dirName, specs := range subdirSpecs {
+		if len(specs.Pods) == 0 {
+			// No pods — all containers are standalone
+			dirTransform := t.DirContainer[dirName]
+			if dirTransform == nil {
+				return nil, fmt.Errorf("no transform for directory %s", dirName)
+			}
+
+			for _, f := range specs.Containers {
+				name := strings.TrimSuffix(filepath.Base(f), ".container")
+				if prev, exists := sources[name]; exists {
+					return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
+				}
+				content, err := transformContainerFile(f, t.Base, dirTransform)
+				if err != nil {
+					return nil, err
+				}
+				desired[name] = buildDesiredState(name, content, t.Companions)
+				sources[name] = f
+			}
+			continue
 		}
 
-		for _, f := range files {
+		// Directory has pods — group containers by pod
+		podStems := map[string]string{} // stem → pod file path
+		for _, f := range specs.Pods {
+			stem := strings.TrimSuffix(filepath.Base(f), ".pod")
+			podStems[stem] = f
+		}
+
+		podMembers := map[string][]string{} // pod stem → member files
+		for _, f := range specs.Containers {
 			name := strings.TrimSuffix(filepath.Base(f), ".container")
-			if prev, exists := sources[name]; exists {
-				return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
+			memberOf := ""
+			for stem := range podStems {
+				if strings.HasPrefix(name, stem+"-") {
+					memberOf = stem
+					break
+				}
 			}
-			data, err := os.ReadFile(f)
+			if memberOf == "" {
+				return nil, fmt.Errorf("%s: container does not belong to any pod in directory %s", f, dirName)
+			}
+			podMembers[memberOf] = append(podMembers[memberOf], f)
+		}
+
+		for stem, podFile := range podStems {
+			if prev, exists := sources[stem]; exists {
+				return nil, fmt.Errorf("duplicate name %q: %s and %s", stem, prev, podFile)
+			}
+			members := podMembers[stem]
+			state, err := buildPodDesired(stem, podFile, members, t, &dirName)
 			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", f, err)
+				return nil, err
 			}
-			spec, err := ParseINI(strings.NewReader(string(data)))
-			if err != nil {
-				return nil, fmt.Errorf("parsing %s: %w", f, err)
-			}
-			var tList []*INIFile
-			if base != nil {
-				tList = append(tList, base)
-			}
-			tList = append(tList, transform)
-			content := applyTransforms(spec, tList).String()
-			desired[name] = buildDesiredState(name, content, companions)
-			sources[name] = f
+			desired[stem] = state
+			sources[stem] = podFile
 		}
 	}
 
 	return desired, nil
+}
+
+// transformContainerFile reads and applies transforms to a container file.
+func transformContainerFile(path string, base, dirTransform *INIFile) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	var tList []*INIFile
+	if base != nil {
+		tList = append(tList, base)
+	}
+	if dirTransform != nil {
+		tList = append(tList, dirTransform)
+	}
+	if len(tList) == 0 {
+		return string(data), nil
+	}
+	spec, err := ParseINI(strings.NewReader(string(data)))
+	if err != nil {
+		return "", fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return applyTransforms(spec, tList).String(), nil
+}
+
+// buildPodDesired builds a DesiredState for a pod and its members.
+// dirName is nil for root-level pods.
+func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms, dirName *string) (DesiredState, error) {
+	files := map[string]string{}
+
+	// Process pod file
+	podData, err := os.ReadFile(podFile)
+	if err != nil {
+		return DesiredState{}, fmt.Errorf("reading %s: %w", podFile, err)
+	}
+	var podTList []*INIFile
+	if t.BasePod != nil {
+		podTList = append(podTList, t.BasePod)
+	}
+	if dirName != nil {
+		if dt, ok := t.DirPod[*dirName]; ok {
+			podTList = append(podTList, dt)
+		}
+	}
+	var podContent string
+	if len(podTList) > 0 {
+		spec, err := ParseINI(strings.NewReader(string(podData)))
+		if err != nil {
+			return DesiredState{}, fmt.Errorf("parsing %s: %w", podFile, err)
+		}
+		podContent = applyTransforms(spec, podTList).String()
+	} else {
+		podContent = string(podData)
+	}
+	podContent = strings.ReplaceAll(podContent, "{{.Name}}", podStem)
+	files[podStem+".pod"] = podContent
+
+	podFilename := podStem + ".pod"
+
+	// Process each member
+	for _, f := range memberFiles {
+		memberFullName := strings.TrimSuffix(filepath.Base(f), ".container")
+
+		var dirTransform *INIFile
+		if dirName != nil {
+			dirTransform = t.DirContainer[*dirName]
+		}
+		content, err := transformContainerFile(f, t.Base, dirTransform)
+		if err != nil {
+			return DesiredState{}, err
+		}
+
+		// Inject Pod= into the container
+		ini, err := ParseINI(strings.NewReader(content))
+		if err != nil {
+			return DesiredState{}, fmt.Errorf("parsing merged %s: %w", f, err)
+		}
+		injectPod(ini, podFilename)
+		content = ini.String()
+		content = strings.ReplaceAll(content, "{{.Name}}", memberFullName)
+		files[memberFullName+".container"] = content
+
+		// Generate companions for this member
+		for _, c := range t.Companions {
+			companionFilename := memberFullName + c.SuffixAndExt
+			companionContent := strings.ReplaceAll(c.Content, "{{.Name}}", memberFullName)
+			// Inject Pod= into companion .container files
+			if strings.HasSuffix(c.SuffixAndExt, ".container") {
+				cIni, err := ParseINI(strings.NewReader(companionContent))
+				if err != nil {
+					return DesiredState{}, fmt.Errorf("parsing companion %s: %w", companionFilename, err)
+				}
+				injectPod(cIni, podFilename)
+				companionContent = cIni.String()
+			}
+			files[companionFilename] = companionContent
+		}
+
+	}
+
+	if len(memberFiles) == 0 {
+		log.Printf("warning: pod %s has no member containers", podStem)
+	}
+
+	return DesiredState{
+		Files:       files,
+		ServiceName: podStem + "-pod",
+	}, nil
 }
 
 // buildDesiredState creates a DesiredState for a container, including its
@@ -416,7 +633,7 @@ func buildDesiredState(name, containerContent string, companions []CompanionTemp
 		content := strings.ReplaceAll(c.Content, "{{.Name}}", name)
 		files[filename] = content
 	}
-	return DesiredState{Files: files}
+	return DesiredState{Files: files, ServiceName: name}
 }
 
 func specChanged(hashDir, name string, state DesiredState) bool {

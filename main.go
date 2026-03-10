@@ -92,23 +92,32 @@ func cmdAugment() {
 		log.Fatalf("loading config: %v", err)
 	}
 
-	base, transforms, _, err := loadTransforms(cfg.TransformDir)
+	transforms, err := loadAllTransforms(cfg.TransformDir)
 	if err != nil {
 		log.Fatalf("loading transforms: %v", err)
 	}
 
-	// Determine which transform to apply based on the file's parent directory
-	// If it's in a subdirectory that has a matching transform, apply it
 	dir := parentDirName(filePath)
+	isPod := strings.HasSuffix(filePath, ".pod")
+
 	var tList []*INIFile
-	if base != nil {
-		tList = append(tList, base)
+	if isPod {
+		if transforms.BasePod != nil {
+			tList = append(tList, transforms.BasePod)
+		}
+		if dt, ok := transforms.DirPod[dir]; ok {
+			tList = append(tList, dt)
+		}
+	} else {
+		if transforms.Base != nil {
+			tList = append(tList, transforms.Base)
+		}
+		if dt, ok := transforms.DirContainer[dir]; ok {
+			tList = append(tList, dt)
+		}
 	}
-	if transform, ok := transforms[dir]; ok {
-		tList = append(tList, transform)
-	}
+
 	if len(tList) == 0 {
-		// No transforms, print as-is
 		fmt.Print(spec.String())
 		return
 	}

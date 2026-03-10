@@ -113,3 +113,17 @@ func cloneSection(s Section) Section {
 	copy(c.Entries, s.Entries)
 	return c
 }
+
+// injectPod adds Pod=<podFilename> into the [Container] section of an INI file.
+// If no [Container] section exists, one is created.
+func injectPod(ini *INIFile, podFilename string) {
+	sec := ini.GetSection("Container")
+	if sec == nil {
+		ini.Sections = append(ini.Sections, Section{
+			Name:    "Container",
+			Entries: []Entry{{Key: "Pod", Value: podFilename}},
+		})
+		return
+	}
+	sec.Entries = append(sec.Entries, Entry{Key: "Pod", Value: podFilename})
+}

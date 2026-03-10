@@ -341,6 +341,32 @@ Restart=on-failure
 	}
 }
 
+func TestInjectPod(t *testing.T) {
+	t.Run("adds Pod to existing Container section", func(t *testing.T) {
+		ini := parseINI(t, "[Container]\nImage=nginx\n")
+		injectPod(ini, "webapp.pod")
+		output := ini.String()
+		if !strings.Contains(output, "Pod=webapp.pod") {
+			t.Errorf("Pod= not injected:\n%s", output)
+		}
+		if !strings.Contains(output, "Image=nginx") {
+			t.Errorf("Image= lost:\n%s", output)
+		}
+	})
+
+	t.Run("creates Container section if missing", func(t *testing.T) {
+		ini := parseINI(t, "[Service]\nRestart=always\n")
+		injectPod(ini, "webapp.pod")
+		output := ini.String()
+		if !strings.Contains(output, "[Container]") {
+			t.Errorf("Container section not created:\n%s", output)
+		}
+		if !strings.Contains(output, "Pod=webapp.pod") {
+			t.Errorf("Pod= not injected:\n%s", output)
+		}
+	})
+}
+
 func TestMergeNoTransform(t *testing.T) {
 	spec := parseINI(t, `[Container]
 Image=nginx:latest
