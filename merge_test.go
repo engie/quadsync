@@ -28,7 +28,7 @@ After=network-online.target
 
 [Container]
 Network=slirp4netns
-PodmanArgs=--network-cmd-path=/usr/local/bin/ts4nsnet
+PodmanArgs=--network-cmd-path=/usr/local/bin/netavark-tailscale-plugin
 
 [Service]
 Restart=on-failure
@@ -53,7 +53,7 @@ WantedBy=default.target
 	if !strings.Contains(output, "Network=slirp4netns") {
 		t.Error("transform Network should be added")
 	}
-	if !strings.Contains(output, "PodmanArgs=--network-cmd-path=/usr/local/bin/ts4nsnet") {
+	if !strings.Contains(output, "PodmanArgs=--network-cmd-path=/usr/local/bin/netavark-tailscale-plugin") {
 		t.Error("transform PodmanArgs should be added")
 	}
 
@@ -155,7 +155,7 @@ After=network-online.target
 
 [Container]
 Network=slirp4netns
-PodmanArgs=--network-cmd-path=/usr/local/bin/ts4nsnet --dns=100.100.100.100 --dns-search=tailnet.ts.net
+PodmanArgs=--network-cmd-path=/usr/local/bin/netavark-tailscale-plugin --dns=100.100.100.100 --dns-search=tailnet.ts.net
 
 [Service]
 +ExecStartPre=mkdir -p %t/ts-authkeys
