@@ -225,11 +225,6 @@ func Sync(config Config) error {
 		if failed {
 			continue
 		}
-		if err := chownQuadletDir(name); err != nil {
-			log.Printf("error chowning quadlet dir for %s: %v", name, err)
-			errs = append(errs, fmt.Errorf("chowning quadlet dir for %s: %w", name, err))
-			continue
-		}
 		if err := waitForUserManager(name); err != nil {
 			log.Printf("error waiting for user manager %s: %v", name, err)
 			errs = append(errs, fmt.Errorf("waiting for user manager %s: %w", name, err))

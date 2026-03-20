@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -165,59 +163,50 @@ func userdellTransient(output string) bool {
 		strings.Contains(output, "currently used by process")
 }
 
-// writeQuadletFile writes a single quadlet file to the user's quadlet directory.
-// filename is the complete filename (e.g. "myapp.container", "myapp-data.volume").
-// Call chownQuadletDir after writing all files for a user.
-func writeQuadletFile(username, filename, content string) error {
-	home, err := userHome(username)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Join(home, ".config", "containers", "systemd")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating quadlet dir: %w", err)
-	}
-	path := filepath.Join(dir, filename)
-	return os.WriteFile(path, []byte(content), 0644)
+// runAsUser executes a shell command as the given user via runuser.
+func runAsUser(timeout time.Duration, username, shellCmd string) (string, error) {
+	return run(timeout, "runuser", "-s", "/bin/sh", username, "-c", shellCmd)
 }
 
-// chownQuadletDir chowns the .config tree to the user. Podman refuses to run
-// if any parent directory is not owned by the container user.
-func chownQuadletDir(username string) error {
-	home, err := userHome(username)
-	if err != nil {
-		return err
+// runAsUserStdin executes a shell command as the given user, piping stdin.
+func runAsUserStdin(timeout time.Duration, username, shellCmd, stdin string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "runuser", "-s", "/bin/sh", username, "-c", shellCmd)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("command timed out after %s: runuser %s: %s", timeout, username, shellCmd)
 	}
-	if _, err := run(defaultTimeout, "chown", "-R", username+":"+username, filepath.Join(home, ".config")); err != nil {
-		return fmt.Errorf("chowning .config for %s: %w", username, err)
+	if err != nil {
+		return string(out), fmt.Errorf("runuser %s: %s: %w\n%s", username, shellCmd, err, out)
+	}
+	return string(out), nil
+}
+
+// writeQuadletFile writes a single quadlet file to the user's quadlet directory.
+// Runs as the target user to prevent symlink attacks from escalating privileges.
+func writeQuadletFile(username, filename, content string) error {
+	if strings.ContainsAny(filename, "/\x00") {
+		return fmt.Errorf("invalid quadlet filename %q", filename)
+	}
+	dir := ".config/containers/systemd"
+	shellCmd := fmt.Sprintf("mkdir -p ~/%s && cat > ~/%s/%s", dir, dir, filename)
+	if _, err := runAsUserStdin(defaultTimeout, username, shellCmd, content); err != nil {
+		return fmt.Errorf("writing quadlet %s for %s: %w", filename, username, err)
 	}
 	return nil
 }
 
 // removeAllQuadlets removes all files from the user's quadlet directory.
-// quadsync owns this directory, so clearing it on user removal is correct.
+// Runs as the target user to prevent symlink attacks.
 func removeAllQuadlets(username string) error {
-	home, err := userHome(username)
-	if err != nil {
-		return err
+	dir := ".config/containers/systemd"
+	shellCmd := fmt.Sprintf("find ~/%s -maxdepth 1 -type f -delete 2>/dev/null; true", dir)
+	if _, err := runAsUser(defaultTimeout, username, shellCmd); err != nil {
+		return fmt.Errorf("removing quadlets for %s: %w", username, err)
 	}
-	dir := filepath.Join(home, ".config", "containers", "systemd")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var errs []error
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // runUserM runs "systemctl --user -M <user>@" with inherited stdout/stderr.
@@ -273,14 +262,3 @@ func managedUsers(group string) ([]string, error) {
 	return strings.Split(parts[3], ","), nil
 }
 
-func userHome(username string) (string, error) {
-	out, err := exec.Command("getent", "passwd", username).Output()
-	if err != nil {
-		return "", fmt.Errorf("getent passwd %s: %w", username, err)
-	}
-	fields := strings.Split(strings.TrimSpace(string(out)), ":")
-	if len(fields) < 6 || fields[5] == "" {
-		return "", fmt.Errorf("getent passwd %s: missing home directory field", username)
-	}
-	return fields[5], nil
-}
