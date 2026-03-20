@@ -102,7 +102,7 @@ func TestCheckPodFile(t *testing.T) {
 		if len(errs) != 1 {
 			t.Fatalf("expected 1 error, got %v", errs)
 		}
-		if !strings.Contains(errs[0].Error(), "no hyphens") {
+		if !strings.Contains(errs[0].Error(), "not valid") {
 			t.Fatalf("unexpected error: %v", errs[0])
 		}
 	})
@@ -126,7 +126,7 @@ func TestCheckPodFile(t *testing.T) {
 
 func TestCheckDesired(t *testing.T) {
 	t.Run("valid desired state", func(t *testing.T) {
-		desired := map[string]DesiredState{
+		desired := map[Username]DesiredState{
 			"myapp": {Files: map[string]string{
 				"myapp.container": "[Container]\nImage=docker.io/library/nginx\n",
 			}},
@@ -138,7 +138,7 @@ func TestCheckDesired(t *testing.T) {
 	})
 
 	t.Run("broken container fails", func(t *testing.T) {
-		desired := map[string]DesiredState{
+		desired := map[Username]DesiredState{
 			"myapp": {Files: map[string]string{
 				"myapp.container": "[Service]\nRestart=always\n",
 			}},
@@ -150,7 +150,7 @@ func TestCheckDesired(t *testing.T) {
 	})
 
 	t.Run("companion files not validated as containers", func(t *testing.T) {
-		desired := map[string]DesiredState{
+		desired := map[Username]DesiredState{
 			"myapp": {Files: map[string]string{
 				"myapp.container":   "[Container]\nImage=docker.io/library/nginx\n",
 				"myapp-data.volume": "[Volume]\nDriver=local\n",
@@ -163,7 +163,7 @@ func TestCheckDesired(t *testing.T) {
 	})
 
 	t.Run("pod desired state validates pod and containers", func(t *testing.T) {
-		desired := map[string]DesiredState{
+		desired := map[Username]DesiredState{
 			"webapp": {Files: map[string]string{
 				"webapp.pod":           "[Pod]\nPodmanArgs=--dns=1.1.1.1\n",
 				"webapp-web.container": "[Container]\nImage=nginx\nPod=webapp.pod\n",
@@ -177,7 +177,7 @@ func TestCheckDesired(t *testing.T) {
 	})
 
 	t.Run("pod missing Pod section fails", func(t *testing.T) {
-		desired := map[string]DesiredState{
+		desired := map[Username]DesiredState{
 			"webapp": {Files: map[string]string{
 				"webapp.pod": "[Service]\nRestart=always\n",
 			}},

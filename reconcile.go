@@ -173,7 +173,7 @@ func Sync(config Config) error {
 	if err != nil {
 		return fmt.Errorf("listing managed users: %w", err)
 	}
-	currentSet := map[string]bool{}
+	currentSet := map[Username]bool{}
 	for _, u := range current {
 		currentSet[u] = true
 	}
@@ -190,11 +190,11 @@ func Sync(config Config) error {
 	// it as a warning but do not count it as a quadsync failure.
 	var errs []error
 
-	names := make([]string, 0, len(desired))
+	names := make([]Username, 0, len(desired))
 	for name := range desired {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
 
 	for _, name := range names {
 		state := desired[name]
@@ -254,7 +254,7 @@ func Sync(config Config) error {
 	for _, name := range current {
 		if _, exists := desired[name]; !exists {
 			log.Printf("%s: removing", name)
-			if err := stopService(name, name); err != nil {
+			if err := stopService(name, string(name)); err != nil {
 				log.Printf("warning: stopping %s: %v", name, err)
 			}
 			if err := removeAllQuadlets(name); err != nil {
@@ -264,7 +264,7 @@ func Sync(config Config) error {
 				log.Printf("error deleting user %s: %v", name, err)
 				errs = append(errs, fmt.Errorf("deleting user %s: %w", name, err))
 			}
-			os.Remove(filepath.Join(hashDir, name))
+			os.Remove(filepath.Join(hashDir, string(name)))
 		}
 	}
 
@@ -375,7 +375,7 @@ func loadAllTransforms(dir string) (Transforms, error) {
 
 // buildDesired scans the repo and builds the desired state map.
 // base is the optional base transform applied to all containers.
-func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile, companions []CompanionTemplate) (map[string]DesiredState, error) {
+func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile, companions []CompanionTemplate) (map[Username]DesiredState, error) {
 	t := Transforms{
 		Base:         base,
 		DirContainer: transforms,
@@ -386,9 +386,9 @@ func buildDesired(repoPath string, base *INIFile, transforms map[string]*INIFile
 }
 
 // buildDesiredFull scans the repo and builds the desired state map using full transforms.
-func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, error) {
-	desired := map[string]DesiredState{}
-	sources := map[string]string{} // name → source path (for collision detection)
+func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState, error) {
+	desired := map[Username]DesiredState{}
+	sources := map[Username]string{} // name → source path (for collision detection)
 
 	rootContainers, rootPods, subdirSpecs, err := discoverContainers(repoPath)
 	if err != nil {
@@ -423,7 +423,10 @@ func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, e
 
 	// Root-level standalone .container files — base transform only
 	for _, f := range rootStandalone {
-		name := strings.TrimSuffix(filepath.Base(f), ".container")
+		name, err := NewUsername(strings.TrimSuffix(filepath.Base(f), ".container"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
 		content, err := transformContainerFile(f, t.Base, nil)
 		if err != nil {
 			return nil, err
@@ -434,16 +437,20 @@ func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, e
 
 	// Root-level pods
 	for stem, podFile := range rootPodStems {
-		if prev, exists := sources[stem]; exists {
-			return nil, fmt.Errorf("duplicate name %q: %s and %s", stem, prev, podFile)
+		name, err := NewPodUsername(stem)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", podFile, err)
+		}
+		if prev, exists := sources[name]; exists {
+			return nil, fmt.Errorf("duplicate name %q: %s and %s", name, prev, podFile)
 		}
 		members := rootPodMembers[stem]
 		state, err := buildPodDesired(stem, podFile, members, t, nil)
 		if err != nil {
 			return nil, err
 		}
-		desired[stem] = state
-		sources[stem] = podFile
+		desired[name] = state
+		sources[name] = podFile
 	}
 
 	// Subdirectories
@@ -456,7 +463,10 @@ func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, e
 			}
 
 			for _, f := range specs.Containers {
-				name := strings.TrimSuffix(filepath.Base(f), ".container")
+				name, err := NewUsername(strings.TrimSuffix(filepath.Base(f), ".container"))
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", f, err)
+				}
 				if prev, exists := sources[name]; exists {
 					return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
 				}
@@ -494,16 +504,20 @@ func buildDesiredFull(repoPath string, t Transforms) (map[string]DesiredState, e
 		}
 
 		for stem, podFile := range podStems {
-			if prev, exists := sources[stem]; exists {
-				return nil, fmt.Errorf("duplicate name %q: %s and %s", stem, prev, podFile)
+			name, err := NewPodUsername(stem)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", podFile, err)
+			}
+			if prev, exists := sources[name]; exists {
+				return nil, fmt.Errorf("duplicate name %q: %s and %s", name, prev, podFile)
 			}
 			members := podMembers[stem]
 			state, err := buildPodDesired(stem, podFile, members, t, &dirName)
 			if err != nil {
 				return nil, err
 			}
-			desired[stem] = state
-			sources[stem] = podFile
+			desired[name] = state
+			sources[name] = podFile
 		}
 	}
 
@@ -620,19 +634,20 @@ func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms
 
 // buildDesiredState creates a DesiredState for a container, including its
 // main .container file and any companion files from templates.
-func buildDesiredState(name, containerContent string, companions []CompanionTemplate) DesiredState {
-	containerContent = strings.ReplaceAll(containerContent, "{{.Name}}", name)
-	files := map[string]string{name + ".container": containerContent}
+func buildDesiredState(name Username, containerContent string, companions []CompanionTemplate) DesiredState {
+	nameStr := string(name)
+	containerContent = strings.ReplaceAll(containerContent, "{{.Name}}", nameStr)
+	files := map[string]string{nameStr + ".container": containerContent}
 	for _, c := range companions {
-		filename := name + c.SuffixAndExt
-		content := strings.ReplaceAll(c.Content, "{{.Name}}", name)
+		filename := nameStr + c.SuffixAndExt
+		content := strings.ReplaceAll(c.Content, "{{.Name}}", nameStr)
 		files[filename] = content
 	}
-	return DesiredState{Files: files, ServiceName: name}
+	return DesiredState{Files: files, ServiceName: nameStr}
 }
 
-func specChanged(hashDir, name string, state DesiredState) bool {
-	hashFile := filepath.Join(hashDir, name)
+func specChanged(hashDir string, name Username, state DesiredState) bool {
+	hashFile := filepath.Join(hashDir, string(name))
 	existing, err := os.ReadFile(hashFile)
 	if err != nil {
 		return true // file doesn't exist, treat as changed
@@ -640,8 +655,8 @@ func specChanged(hashDir, name string, state DesiredState) bool {
 	return strings.TrimSpace(string(existing)) != compositeHash(state)
 }
 
-func saveHash(hashDir, name string, state DesiredState) error {
-	hashFile := filepath.Join(hashDir, name)
+func saveHash(hashDir string, name Username, state DesiredState) error {
+	hashFile := filepath.Join(hashDir, string(name))
 	return os.WriteFile(hashFile, []byte(compositeHash(state)), 0644)
 }
 

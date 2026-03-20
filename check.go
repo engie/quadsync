@@ -11,6 +11,31 @@ import (
 var validNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 var validPodNameRe = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
 
+// Username is a validated Linux username suitable for user creation and systemd
+// operations. Construct via NewUsername or NewPodUsername; the underlying string
+// is guaranteed to match [a-z][a-z0-9-]* and be at most 32 characters.
+type Username string
+
+func NewUsername(s string) (Username, error) {
+	if len(s) > 32 {
+		return "", fmt.Errorf("name %q exceeds 32 characters", s)
+	}
+	if !validNameRe.MatchString(s) {
+		return "", fmt.Errorf("name %q is not a valid username ([a-z][a-z0-9-]*)", s)
+	}
+	return Username(s), nil
+}
+
+func NewPodUsername(s string) (Username, error) {
+	if len(s) > 32 {
+		return "", fmt.Errorf("pod name %q exceeds 32 characters", s)
+	}
+	if !validPodNameRe.MatchString(s) {
+		return "", fmt.Errorf("pod name %q is not valid ([a-z][a-z0-9]*)", s)
+	}
+	return Username(s), nil
+}
+
 // SubdirSpecs holds discovered container and pod files in a subdirectory.
 type SubdirSpecs struct {
 	Containers []string
@@ -123,12 +148,8 @@ func checkFile(path string, isPodMember bool) []error {
 	name := strings.TrimSuffix(filepath.Base(path), ".container")
 
 	if !isPodMember {
-		// Validate filename is a valid Linux username
-		if len(name) > 32 {
-			errs = append(errs, fmt.Errorf("%s: filename stem exceeds 32 characters", path))
-		}
-		if !validNameRe.MatchString(name) {
-			errs = append(errs, fmt.Errorf("%s: filename stem %q is not a valid username ([a-z][a-z0-9-]*)", path, name))
+		if _, err := NewUsername(name); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", path, err))
 		}
 	}
 
@@ -146,11 +167,8 @@ func checkPodFile(path string) []error {
 
 	name := strings.TrimSuffix(filepath.Base(path), ".pod")
 
-	if len(name) > 32 {
-		errs = append(errs, fmt.Errorf("%s: pod name exceeds 32 characters", path))
-	}
-	if !validPodNameRe.MatchString(name) {
-		errs = append(errs, fmt.Errorf("%s: pod name %q is not valid (must match [a-z][a-z0-9]*, no hyphens)", path, name))
+	if _, err := NewPodUsername(name); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", path, err))
 	}
 
 	data, err := os.ReadFile(path)
@@ -216,14 +234,14 @@ func checkContent(name, content, source string) []error {
 
 // CheckDesired validates .container and .pod files in each DesiredState entry.
 // Companion files (.volume etc.) are not validated as container specs.
-func CheckDesired(desired map[string]DesiredState) []error {
+func CheckDesired(desired map[Username]DesiredState) []error {
 	var errs []error
 	for name, state := range desired {
 		// Validate pod file if present
-		podFile := name + ".pod"
+		podFile := string(name) + ".pod"
 		if content, ok := state.Files[podFile]; ok {
 			source := fmt.Sprintf("merged output for %s", name)
-			errs = append(errs, checkPodContent(name, content, source)...)
+			errs = append(errs, checkPodContent(string(name), content, source)...)
 		}
 
 		// Validate all .container files in this state

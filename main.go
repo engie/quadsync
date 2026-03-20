@@ -131,14 +131,17 @@ func cmdRedeploy() {
 		fmt.Fprintln(os.Stderr, "Usage: quadsync redeploy <name>")
 		os.Exit(2)
 	}
-	name := os.Args[2]
+	name, err := NewUsername(os.Args[2])
+	if err != nil {
+		log.Fatalf("invalid name: %v", err)
+	}
 
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
 
-	hashFile := filepath.Join(cfg.StateDir, "hashes", name)
+	hashFile := filepath.Join(cfg.StateDir, "hashes", string(name))
 	if err := os.Remove(hashFile); err != nil {
 		if os.IsNotExist(err) {
 			log.Fatalf("no tracked deployment for %q", name)

@@ -90,12 +90,12 @@ func gitResetHard(repoDir, branch string) error {
 
 // createUser creates a user in the given group. Uses a regular (non-system)
 // user so that useradd auto-allocates subuid/subgid ranges for rootless Podman.
-func createUser(name, group string) error {
-	_, err := run(defaultTimeout, "useradd", "--create-home", "-s", "/sbin/nologin", "-G", group, name)
+func createUser(name Username, group string) error {
+	_, err := run(defaultTimeout, "useradd", "--create-home", "-s", "/sbin/nologin", "-G", group, string(name))
 	if err != nil {
 		return fmt.Errorf("creating user %s: %w", name, err)
 	}
-	_, err = run(defaultTimeout, "loginctl", "enable-linger", name)
+	_, err = run(defaultTimeout, "loginctl", "enable-linger", string(name))
 	if err != nil {
 		return fmt.Errorf("enabling linger for %s: %w", name, err)
 	}
@@ -105,8 +105,8 @@ func createUser(name, group string) error {
 // waitForUserManager ensures a user's systemd instance is ready.
 // Explicitly starts user@<uid>.service (no-op if already running) and
 // verifies the D-Bus socket exists before returning.
-func waitForUserManager(name string) error {
-	uidStr, err := run(shortTimeout, "id", "-u", name)
+func waitForUserManager(name Username) error {
+	uidStr, err := run(shortTimeout, "id", "-u", string(name))
 	if err != nil {
 		return fmt.Errorf("looking up uid for %s: %w", name, err)
 	}
@@ -122,14 +122,14 @@ func waitForUserManager(name string) error {
 }
 
 // deleteUser stops services and removes a user.
-func deleteUser(name string) error {
+func deleteUser(name Username) error {
 	// Disable linger so logind won't restart the user manager.
-	if _, err := run(defaultTimeout, "loginctl", "disable-linger", name); err != nil {
+	if _, err := run(defaultTimeout, "loginctl", "disable-linger", string(name)); err != nil {
 		log.Printf("warning: disable-linger %s: %v", name, err)
 	}
 	// Terminate all sessions, stop the user manager, clean up /run/user/<uid>.
 	// This is synchronous — it waits for the user runtime to be fully torn down.
-	if _, err := run(systemdTimeout, "loginctl", "terminate-user", name); err != nil {
+	if _, err := run(systemdTimeout, "loginctl", "terminate-user", string(name)); err != nil {
 		log.Printf("warning: terminate-user %s: %v", name, err)
 	}
 	// Remove user and home, retrying on transient "busy" from kernel-level
@@ -139,10 +139,10 @@ func deleteUser(name string) error {
 
 // userdelRetry runs userdel -r with bounded retries for transient errors
 // caused by teardown races (processes still exiting, directory still busy).
-func userdelRetry(name string) error {
+func userdelRetry(name Username) error {
 	const maxAttempts = 4
 	for i := 0; i < maxAttempts; i++ {
-		out, err := run(defaultTimeout, "userdel", "-r", name)
+		out, err := run(defaultTimeout, "userdel", "-r", string(name))
 		if err == nil {
 			return nil
 		}
@@ -164,15 +164,15 @@ func userdellTransient(output string) bool {
 }
 
 // runAsUser executes a shell command as the given user via runuser.
-func runAsUser(timeout time.Duration, username, shellCmd string) (string, error) {
-	return run(timeout, "runuser", "-s", "/bin/sh", username, "-c", shellCmd)
+func runAsUser(timeout time.Duration, username Username, shellCmd string) (string, error) {
+	return run(timeout, "runuser", "-s", "/bin/sh", string(username), "-c", shellCmd)
 }
 
 // runAsUserStdin executes a shell command as the given user, piping stdin.
-func runAsUserStdin(timeout time.Duration, username, shellCmd, stdin string) (string, error) {
+func runAsUserStdin(timeout time.Duration, username Username, shellCmd, stdin string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "runuser", "-s", "/bin/sh", username, "-c", shellCmd)
+	cmd := exec.CommandContext(ctx, "runuser", "-s", "/bin/sh", string(username), "-c", shellCmd)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -186,10 +186,7 @@ func runAsUserStdin(timeout time.Duration, username, shellCmd, stdin string) (st
 
 // writeQuadletFile writes a single quadlet file to the user's quadlet directory.
 // Runs as the target user to prevent symlink attacks from escalating privileges.
-func writeQuadletFile(username, filename, content string) error {
-	if strings.ContainsAny(filename, "/\x00") {
-		return fmt.Errorf("invalid quadlet filename %q", filename)
-	}
+func writeQuadletFile(username Username, filename, content string) error {
 	dir := ".config/containers/systemd"
 	shellCmd := fmt.Sprintf("mkdir -p ~/%s && cat > ~/%s/%s", dir, dir, filename)
 	if _, err := runAsUserStdin(defaultTimeout, username, shellCmd, content); err != nil {
@@ -200,7 +197,7 @@ func writeQuadletFile(username, filename, content string) error {
 
 // removeAllQuadlets removes all files from the user's quadlet directory.
 // Runs as the target user to prevent symlink attacks.
-func removeAllQuadlets(username string) error {
+func removeAllQuadlets(username Username) error {
 	dir := ".config/containers/systemd"
 	shellCmd := fmt.Sprintf("find ~/%s -maxdepth 1 -type f -delete 2>/dev/null; true", dir)
 	if _, err := runAsUser(defaultTimeout, username, shellCmd); err != nil {
@@ -212,10 +209,10 @@ func removeAllQuadlets(username string) error {
 // runUserM runs "systemctl --user -M <user>@" with inherited stdout/stderr.
 // Output goes to the journal rather than being captured, because the machinectl
 // transport (-M) fails when Go pipes stdout/stderr via CombinedOutput().
-func runUserM(username string, args ...string) error {
+func runUserM(username Username, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), systemdTimeout)
 	defer cancel()
-	cmdArgs := append([]string{"--user", "-M", username + "@"}, args...)
+	cmdArgs := append([]string{"--user", "-M", string(username) + "@"}, args...)
 	cmd := exec.CommandContext(ctx, "systemctl", cmdArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -231,22 +228,22 @@ func runUserM(username string, args ...string) error {
 }
 
 // daemonReload runs systemctl --user daemon-reload for a user.
-func daemonReload(username string) error {
+func daemonReload(username Username) error {
 	return runUserM(username, "daemon-reload")
 }
 
 // restartService restarts a user service.
-func restartService(username, serviceName string) error {
+func restartService(username Username, serviceName string) error {
 	return runUserM(username, "restart", serviceName+".service")
 }
 
 // stopService stops a user service.
-func stopService(username, serviceName string) error {
+func stopService(username Username, serviceName string) error {
 	return runUserM(username, "stop", serviceName+".service")
 }
 
 // managedUsers returns the list of users in the given group.
-func managedUsers(group string) ([]string, error) {
+func managedUsers(group string) ([]Username, error) {
 	out, err := run(shortTimeout, "getent", "group", group)
 	if err != nil {
 		// Group might not exist yet or have no members
@@ -259,6 +256,16 @@ func managedUsers(group string) ([]string, error) {
 	if len(parts) < 4 || parts[3] == "" {
 		return nil, nil
 	}
-	return strings.Split(parts[3], ","), nil
+	names := strings.Split(parts[3], ",")
+	users := make([]Username, 0, len(names))
+	for _, n := range names {
+		u, err := NewUsername(n)
+		if err != nil {
+			log.Printf("warning: skipping invalid managed user %q: %v", n, err)
+			continue
+		}
+		users = append(users, u)
+	}
+	return users, nil
 }
 
