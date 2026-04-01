@@ -21,10 +21,21 @@ type CompanionTemplate struct {
 	Content      string // raw content with {{.Name}} placeholders
 }
 
+// ContainerSecret pairs a secret with the container name used when the
+// Secret= directive was injected into the quadlet.  This ensures that
+// createPodmanSecrets creates the podman secret with the same name that
+// appears in the quadlet, even when the container is a pod member whose
+// name differs from the pod's ServiceName.
+type ContainerSecret struct {
+	ContainerName string      // name passed to injectSecretDirectives (e.g. "myapp-db")
+	Entry         SecretEntry
+}
+
 // DesiredState holds all quadlet files for a single container user.
 type DesiredState struct {
-	Files       map[string]string // filename → content (e.g. "myapp.container", "myapp-data.volume")
-	ServiceName string            // systemd service to restart (e.g. "nginx-demo" for standalone, "webapp-pod" for pods)
+	Files       map[string]string  // filename → content (e.g. "myapp.container", "myapp-data.volume")
+	ServiceName string             // systemd service to restart (e.g. "nginx-demo" for standalone, "webapp-pod" for pods)
+	Secrets     []ContainerSecret  // secrets to create via podman before starting
 }
 
 // Config holds the deployer configuration.
@@ -35,6 +46,7 @@ type Config struct {
 	StateDir     string
 	UserGroup    string
 	SSHKey       string // path to SSH deploy key for git
+	AgeKeyFile   string // path to age private key for SOPS decryption
 	RepoPath     string // derived: StateDir + "/repo"
 }
 
@@ -53,6 +65,7 @@ func LoadConfig(path string) (Config, error) {
 		StateDir:     env["QUADSYNC_STATE_DIR"],
 		UserGroup:    env["QUADSYNC_USER_GROUP"],
 		SSHKey:       env["QUADSYNC_SSH_KEY"],
+		AgeKeyFile:   env["QUADSYNC_AGE_KEY"],
 	}
 
 	if c.GitURL == "" {
@@ -106,6 +119,11 @@ func Sync(config Config) error {
 		os.Setenv("GIT_SSH_COMMAND", "ssh -i "+config.SSHKey+" -o StrictHostKeyChecking=accept-new")
 	}
 
+	// Set SOPS_AGE_KEY_FILE so the SOPS decrypt library can find the age key.
+	if config.AgeKeyFile != "" {
+		os.Setenv("SOPS_AGE_KEY_FILE", config.AgeKeyFile)
+	}
+
 	// Ensure state dir exists
 	if err := os.MkdirAll(config.StateDir, 0755); err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
@@ -155,6 +173,7 @@ func Sync(config Config) error {
 	}
 
 	// 4. Build desired state
+	transforms.HasAgeKey = config.AgeKeyFile != ""
 	desired, err := buildDesiredFull(config.RepoPath, transforms)
 	if err != nil {
 		return fmt.Errorf("building desired state: %w", err)
@@ -230,6 +249,13 @@ func Sync(config Config) error {
 			errs = append(errs, fmt.Errorf("waiting for user manager %s: %w", name, err))
 			continue
 		}
+		if len(state.Secrets) > 0 {
+			if err := createPodmanSecrets(name, state.Secrets); err != nil {
+				log.Printf("error creating secrets for %s: %v", name, err)
+				errs = append(errs, fmt.Errorf("creating secrets for %s: %w", name, err))
+				continue
+			}
+		}
 		if err := daemonReload(name); err != nil {
 			log.Printf("error daemon-reload for %s: %v", name, err)
 			errs = append(errs, fmt.Errorf("daemon-reload for %s: %w", name, err))
@@ -278,6 +304,7 @@ type Transforms struct {
 	DirContainer  map[string]*INIFile   // directory-specific .container transforms
 	DirPod        map[string]*INIFile   // directory-specific .pod transforms
 	Companions    []CompanionTemplate
+	HasAgeKey     bool                  // whether SOPS decryption is available
 }
 
 // loadTransforms reads all files from the transform directory.
@@ -427,11 +454,11 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}
-		content, err := transformContainerFile(f, t.Base, nil)
+		content, secrets, err := transformContainerFile(f, t.Base, nil, t.HasAgeKey)
 		if err != nil {
 			return nil, err
 		}
-		desired[name] = buildDesiredState(name, content, t.Companions)
+		desired[name] = buildDesiredState(name, content, t.Companions, secrets)
 		sources[name] = f
 	}
 
@@ -470,11 +497,11 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 				if prev, exists := sources[name]; exists {
 					return nil, fmt.Errorf("duplicate container name %q: %s and %s", name, prev, f)
 				}
-				content, err := transformContainerFile(f, t.Base, dirTransform)
+				content, secrets, err := transformContainerFile(f, t.Base, dirTransform, t.HasAgeKey)
 				if err != nil {
 					return nil, err
 				}
-				desired[name] = buildDesiredState(name, content, t.Companions)
+				desired[name] = buildDesiredState(name, content, t.Companions, secrets)
 				sources[name] = f
 			}
 			continue
@@ -524,12 +551,50 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 	return desired, nil
 }
 
-// transformContainerFile reads and applies transforms to a container file.
-func transformContainerFile(path string, base, dirTransform *INIFile) (string, error) {
+// transformContainerFile reads a .container file, decrypts it if SOPS-encrypted,
+// extracts secrets, strips [Secrets]/[sops] sections, injects Secret= directives,
+// and applies transforms.
+func transformContainerFile(path string, base, dirTransform *INIFile, hasAgeKey bool) (string, []SecretEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", path, err)
+		return "", nil, fmt.Errorf("reading %s: %w", path, err)
 	}
+
+	content := string(data)
+
+	// Decrypt SOPS-encrypted files
+	if hasSOPSSection(content) {
+		if !hasAgeKey {
+			return "", nil, fmt.Errorf("%s: file is SOPS-encrypted but QUADSYNC_AGE_KEY is not configured", path)
+		}
+		decrypted, err := decryptSOPSData(data)
+		if err != nil {
+			return "", nil, fmt.Errorf("decrypting %s: %w", path, err)
+		}
+		content = decrypted
+	}
+
+	spec, err := ParseINI(strings.NewReader(content))
+	if err != nil {
+		return "", nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+
+	// Extract secrets before stripping
+	secrets, err := parseSecrets(spec)
+	if err != nil {
+		return "", nil, fmt.Errorf("parsing secrets in %s: %w", path, err)
+	}
+
+	// Strip [Secrets] and [sops] sections
+	stripSecretsAndSOPS(spec)
+
+	// Inject Secret= directives if there are secrets
+	if len(secrets) > 0 {
+		containerName := strings.TrimSuffix(filepath.Base(path), ".container")
+		injectSecretDirectives(spec, containerName, secrets)
+	}
+
+	// Apply transforms
 	var tList []*INIFile
 	if base != nil {
 		tList = append(tList, base)
@@ -537,20 +602,18 @@ func transformContainerFile(path string, base, dirTransform *INIFile) (string, e
 	if dirTransform != nil {
 		tList = append(tList, dirTransform)
 	}
-	if len(tList) == 0 {
-		return string(data), nil
+	if len(tList) > 0 {
+		spec = applyTransforms(spec, tList)
 	}
-	spec, err := ParseINI(strings.NewReader(string(data)))
-	if err != nil {
-		return "", fmt.Errorf("parsing %s: %w", path, err)
-	}
-	return applyTransforms(spec, tList).String(), nil
+
+	return spec.String(), secrets, nil
 }
 
 // buildPodDesired builds a DesiredState for a pod and its members.
 // dirName is nil for root-level pods.
 func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms, dirName *string) (DesiredState, error) {
 	files := map[string]string{}
+	var allSecrets []ContainerSecret
 
 	// Process pod file
 	podData, err := os.ReadFile(podFile)
@@ -589,9 +652,13 @@ func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms
 		if dirName != nil {
 			dirTransform = t.DirContainer[*dirName]
 		}
-		content, err := transformContainerFile(f, t.Base, dirTransform)
+		content, memberSecrets, err := transformContainerFile(f, t.Base, dirTransform, t.HasAgeKey)
 		if err != nil {
 			return DesiredState{}, err
+		}
+		// Collect secrets from all pod members, tagged with the member's name
+		for _, s := range memberSecrets {
+			allSecrets = append(allSecrets, ContainerSecret{ContainerName: memberFullName, Entry: s})
 		}
 
 		// Inject Pod= into the container
@@ -629,12 +696,13 @@ func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms
 	return DesiredState{
 		Files:       files,
 		ServiceName: podStem + "-pod",
+		Secrets:     allSecrets,
 	}, nil
 }
 
 // buildDesiredState creates a DesiredState for a container, including its
 // main .container file and any companion files from templates.
-func buildDesiredState(name Username, containerContent string, companions []CompanionTemplate) DesiredState {
+func buildDesiredState(name Username, containerContent string, companions []CompanionTemplate, secrets []SecretEntry) DesiredState {
 	nameStr := string(name)
 	containerContent = strings.ReplaceAll(containerContent, "{{.Name}}", nameStr)
 	files := map[string]string{nameStr + ".container": containerContent}
@@ -643,7 +711,11 @@ func buildDesiredState(name Username, containerContent string, companions []Comp
 		content := strings.ReplaceAll(c.Content, "{{.Name}}", nameStr)
 		files[filename] = content
 	}
-	return DesiredState{Files: files, ServiceName: nameStr}
+	var cs []ContainerSecret
+	for _, s := range secrets {
+		cs = append(cs, ContainerSecret{ContainerName: nameStr, Entry: s})
+	}
+	return DesiredState{Files: files, ServiceName: nameStr, Secrets: cs}
 }
 
 func specChanged(hashDir string, name Username, state DesiredState) bool {
@@ -660,8 +732,8 @@ func saveHash(hashDir string, name Username, state DesiredState) error {
 	return os.WriteFile(hashFile, []byte(compositeHash(state)), 0644)
 }
 
-// compositeHash computes a single hash over all files in a DesiredState,
-// sorted by filename for determinism.
+// compositeHash computes a single hash over all files and secrets in a
+// DesiredState, sorted for determinism.
 func compositeHash(state DesiredState) string {
 	h := sha256.New()
 	names := make([]string, 0, len(state.Files))
@@ -673,5 +745,23 @@ func compositeHash(state DesiredState) string {
 		h.Write([]byte(n))
 		h.Write([]byte(state.Files[n]))
 	}
+
+	// Include secret data so rotated values trigger redeployment.
+	sorted := make([]ContainerSecret, len(state.Secrets))
+	copy(sorted, state.Secrets)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].ContainerName != sorted[j].ContainerName {
+			return sorted[i].ContainerName < sorted[j].ContainerName
+		}
+		return sorted[i].Entry.Name < sorted[j].Entry.Name
+	})
+	for _, s := range sorted {
+		h.Write([]byte(s.ContainerName))
+		h.Write([]byte(s.Entry.Name))
+		h.Write([]byte(s.Entry.Type))
+		h.Write([]byte(s.Entry.Target))
+		h.Write([]byte(s.Entry.Value))
+	}
+
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

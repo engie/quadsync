@@ -19,7 +19,7 @@ func TestCompanionNameSubstitution(t *testing.T) {
 		},
 	}
 
-	state := buildDesiredState("myapp", "[Container]\nImage=myapp\n", companions)
+	state := buildDesiredState("myapp", "[Container]\nImage=myapp\n", companions, nil)
 
 	if len(state.Files) != 3 {
 		t.Fatalf("expected 3 files, got %d", len(state.Files))
@@ -50,7 +50,7 @@ func TestCompanionNameSubstitution(t *testing.T) {
 }
 
 func TestContainerContentNameSubstitution(t *testing.T) {
-	state := buildDesiredState("myapp", "[Container]\nImage=myapp\nVolume={{.Name}}-data.volume:/data\n", nil)
+	state := buildDesiredState("myapp", "[Container]\nImage=myapp\nVolume={{.Name}}-data.volume:/data\n", nil, nil)
 
 	content := state.Files["myapp.container"]
 	if strings.Contains(content, "{{.Name}}") {

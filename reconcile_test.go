@@ -452,6 +452,40 @@ func TestBuildDesiredRootPod(t *testing.T) {
 	}
 }
 
+func TestCompositeHashIncludesSecrets(t *testing.T) {
+	files := map[string]string{"app.container": "[Container]\nImage=nginx\n"}
+
+	stateA := DesiredState{
+		Files:       files,
+		ServiceName: "app",
+		Secrets: []ContainerSecret{
+			{ContainerName: "app", Entry: SecretEntry{Name: "DB_PASS", Type: "env", Target: "DB_PASS", Value: "hunter2"}},
+		},
+	}
+	stateB := DesiredState{
+		Files:       files,
+		ServiceName: "app",
+		Secrets: []ContainerSecret{
+			{ContainerName: "app", Entry: SecretEntry{Name: "DB_PASS", Type: "env", Target: "DB_PASS", Value: "rotated-password"}},
+		},
+	}
+	stateNoSecrets := DesiredState{
+		Files:       files,
+		ServiceName: "app",
+	}
+
+	hashA := compositeHash(stateA)
+	hashB := compositeHash(stateB)
+	hashNone := compositeHash(stateNoSecrets)
+
+	if hashA == hashB {
+		t.Error("different secret values must produce different hashes")
+	}
+	if hashA == hashNone {
+		t.Error("state with secrets must hash differently from state without secrets")
+	}
+}
+
 func TestBuildDesiredSubdirNoPodNoTransformAllowed(t *testing.T) {
 	// Subdir with pods but no dir container transform — should work (members get only base)
 	dir := t.TempDir()

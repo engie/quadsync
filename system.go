@@ -242,6 +242,20 @@ func stopService(username Username, serviceName string) error {
 	return runUserM(username, "stop", serviceName+".service")
 }
 
+// createPodmanSecrets creates or replaces podman secrets for a user.
+// Each ContainerSecret carries the container name that was used when
+// injecting Secret= directives, so the podman secret name matches.
+func createPodmanSecrets(username Username, secrets []ContainerSecret) error {
+	for _, s := range secrets {
+		name := podmanSecretName(s.ContainerName, s.Entry.Name)
+		shellCmd := fmt.Sprintf("podman secret create --replace %s -", name)
+		if _, err := runAsUserStdin(defaultTimeout, username, shellCmd, s.Entry.Value); err != nil {
+			return fmt.Errorf("creating secret %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // managedUsers returns the list of users in the given group.
 func managedUsers(group string) ([]Username, error) {
 	out, err := run(shortTimeout, "getent", "group", group)

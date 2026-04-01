@@ -26,6 +26,8 @@ func main() {
 		cmdCheck()
 	case "augment":
 		cmdAugment()
+	case "edit":
+		cmdEdit()
 	case "redeploy":
 		cmdRedeploy()
 	default:
@@ -40,6 +42,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  quadsync sync              Full reconcile (git-sync, merge, deploy)")
 	fmt.Fprintln(os.Stderr, "  quadsync check <dir>       Validate .container files")
 	fmt.Fprintln(os.Stderr, "  quadsync augment <file>    Print merged result to stdout")
+	fmt.Fprintln(os.Stderr, "  quadsync edit <file>       Edit a .container file, decrypting and re-encrypting if needed")
 	fmt.Fprintln(os.Stderr, "  quadsync redeploy <name>   Force redeployment on next sync")
 }
 

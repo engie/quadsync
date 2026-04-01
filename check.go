@@ -282,5 +282,12 @@ func checkContentPostMerge(name, content, source string) []error {
 		}
 	}
 
+	if f.GetSection(sectionSecrets) != nil {
+		errs = append(errs, fmt.Errorf("%s: [Secrets] section should have been stripped", source))
+	}
+	if f.GetSection(sectionSOPS) != nil {
+		errs = append(errs, fmt.Errorf("%s: [sops] section should have been stripped", source))
+	}
+
 	return errs
 }

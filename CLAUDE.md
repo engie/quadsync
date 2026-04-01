@@ -23,7 +23,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o quadsync-linu
 
 ## Architecture
 
-All code is in the `main` package (flat structure, no sub-packages). Zero external dependencies — pure standard library.
+All code is in the `main` package (flat structure, no sub-packages). One external dependency: `github.com/getsops/sops/v3` for SOPS-encrypted secrets decryption.
 
 **Files and responsibilities:**
 
@@ -33,12 +33,13 @@ All code is in the `main` package (flat structure, no sub-packages). Zero extern
 - `ini.go` — INI parser/serializer that preserves comments, blank lines, and ordering for round-trip fidelity.
 - `system.go` — Shell-out wrappers for git, useradd/userdel, loginctl, and systemctl operations. Uses `systemctl --user -M <user>@` for per-user service management.
 - `check.go` — Validates `.container` files: filename must be a valid Linux username (`[a-z][a-z0-9-]*`, max 32), must have `[Container]` section with `Image=`.
+- `secrets.go` — SOPS decryption (via age), `[Secrets]` section parsing, secret injection into quadlets, podman secret management.
 
 **Sync workflow (reconcile.go:Sync):**
 1. Git clone or fetch+reset the configured repo
 2. Load transform files from `/etc/quadsync/transforms/`
-3. Build desired state: root-level `.container` files used as-is; subdirectory `.container` files get merged with the matching transform
-4. For each container: create user if needed → skip if content hash unchanged → write quadlet → daemon-reload → restart
+3. Build desired state: root-level `.container` files used as-is; subdirectory `.container` files get merged with the matching transform. SOPS-encrypted files are decrypted, `[Secrets]` sections are parsed and converted to `Secret=` directives.
+4. For each container: create user if needed → skip if content hash unchanged → create podman secrets → write quadlet → daemon-reload → restart
 5. Clean up removed containers: stop service → remove quadlet → delete user
 
 **Configuration** is read from `/etc/quadsync/config.env`:
