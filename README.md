@@ -44,12 +44,13 @@ quadsync reads `/etc/quadsync/config.env`:
 ```env
 QUADSYNC_GIT_URL=https://github.com/you/your-containers.git
 QUADSYNC_GIT_BRANCH=main
+QUADSYNC_AGE_KEY=/etc/quadsync/keys/age.txt
 QUADSYNC_TRANSFORM_DIR=/etc/quadsync/transforms
 QUADSYNC_STATE_DIR=/var/lib/quadsync
 QUADSYNC_USER_GROUP=cusers
 ```
 
-Only `QUADSYNC_GIT_URL` is required; the rest have defaults shown above.
+Only `QUADSYNC_GIT_URL` is required. `QUADSYNC_AGE_KEY` is optional and only needed if your repo contains encrypted `[Secrets]` entries.
 
 ## Usage
 
@@ -57,6 +58,7 @@ Only `QUADSYNC_GIT_URL` is required; the rest have defaults shown above.
 quadsync sync              Full reconcile (git-sync, merge, deploy)
 quadsync check <dir>       Validate .container files
 quadsync augment <file>    Print merged result to stdout
+quadsync edit <file>       Edit a .container file, decrypting and re-encrypting secrets
 quadsync redeploy <name>   Force redeployment on next sync
 ```
 
@@ -65,6 +67,8 @@ quadsync redeploy <name>   Force redeployment on next sync
 **check** — validates `.container` files in a directory. Checks that filenames are valid Linux usernames (`[a-z][a-z0-9-]*`, max 32 chars) and that each file has a `[Container]` section with `Image=`. Useful as a CI pre-merge check. Note: `sync` also runs these checks on both the raw inputs and the merged output, so invalid specs are caught before deployment even if `check` isn't run separately.
 
 **augment** — previews the result of merging a `.container` file with its matching transform, printing the merged output to stdout.
+
+**edit** — opens a `.container` file in `$EDITOR` using a scratch file on tmpfs when available. Secret entries in `[Secrets]` are decrypted before editing and re-encrypted inline when the editor exits.
 
 **redeploy** — clears the stored content hash for a service so that the next `sync` rewrites its quadlet and restarts it, even if the spec hasn't changed. Useful after manual changes to transforms, host config, or to recover a service whose quadlet was deleted.
 
@@ -89,6 +93,50 @@ Transform files live on the host at the transform directory (default `/etc/quads
 /etc/quadsync/transforms/
   webapps.container             # applied to all files in repo/webapps/
 ```
+
+## Secrets
+
+quadsync can keep secret values inline inside `.container` files without encrypting the rest of the INI. Only keys in a `[Secrets]` section are treated as secrets.
+
+Generate an age keypair:
+
+```bash
+mkdir -p /etc/quadsync/keys
+age-keygen -o /etc/quadsync/keys/age.txt
+chmod 600 /etc/quadsync/keys/age.txt
+grep '^# public key:' /etc/quadsync/keys/age.txt
+```
+
+Configure the private key path in `/etc/quadsync/config.env`:
+
+```env
+QUADSYNC_AGE_KEY=/etc/quadsync/keys/age.txt
+```
+
+Plaintext authoring format:
+
+```ini
+[Container]
+Image=registry.example.com/planning-webapp:latest
+
+[Secrets]
+Environment=DATABASE_URL=postgres://admin:s3cret@db.internal:5432/planning
+File=TLS_CERT:/run/secrets/tls.cert:aGVsbG8gd29ybGQ=
+```
+
+Secret value formats:
+
+- `Environment=NAME=value` injects a Podman secret as an environment variable named `NAME`
+- `File=NAME:<target>:<base64-value>` mounts a Podman secret at `<target>`; the stored payload is the base64-decoded value
+
+After `quadsync edit` or any other re-encryption path, each secret value is stored inline as compact age ciphertext with the recipient embedded in the value. During `quadsync sync`:
+
+1. `[Secrets]` entries are decrypted with `QUADSYNC_AGE_KEY`
+2. Podman secrets named `<container>-<secret-name>` are created or replaced
+3. `[Secrets]` is stripped from the deployed quadlet
+4. Matching `Secret=` directives are injected into `[Container]`
+
+If an encrypted secret is present and `QUADSYNC_AGE_KEY` is not configured, sync and edit fail.
 
 ## Requirements
 

@@ -12,10 +12,10 @@ import (
 
 // Timeout classes for external commands.
 const (
-	shortTimeout   = 30 * time.Second  // id, getent, rev-parse
-	defaultTimeout = 60 * time.Second  // useradd, userdel, loginctl, chown, git reset
-	gitNetTimeout  = 2 * time.Minute   // git clone, git fetch (network-bound)
-	systemdTimeout = 90 * time.Second  // systemctl --user operations (container stop can be slow)
+	shortTimeout   = 30 * time.Second // id, getent, rev-parse
+	defaultTimeout = 60 * time.Second // useradd, userdel, loginctl, chown, git reset
+	gitNetTimeout  = 2 * time.Minute  // git clone, git fetch (network-bound)
+	systemdTimeout = 90 * time.Second // systemctl --user operations (container stop can be slow)
 )
 
 // run executes a command with a timeout and returns combined output.
@@ -242,6 +242,18 @@ func stopService(username Username, serviceName string) error {
 	return runUserM(username, "stop", serviceName+".service")
 }
 
+// createPodmanSecrets creates or replaces podman secrets for a user.
+func createPodmanSecrets(username Username, secrets []ContainerSecret) error {
+	for _, s := range secrets {
+		name := podmanSecretName(s.ContainerName, s.Entry.Name)
+		shellCmd := fmt.Sprintf("podman secret create --replace %s -", name)
+		if _, err := runAsUserStdin(defaultTimeout, username, shellCmd, s.Entry.Value); err != nil {
+			return fmt.Errorf("creating secret %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // managedUsers returns the list of users in the given group.
 func managedUsers(group string) ([]Username, error) {
 	out, err := run(shortTimeout, "getent", "group", group)
@@ -268,4 +280,3 @@ func managedUsers(group string) ([]Username, error) {
 	}
 	return users, nil
 }
-

@@ -229,6 +229,10 @@ func checkContent(name, content, source string) []error {
 		}
 	}
 
+	if f.GetSection(sectionSecrets) != nil {
+		errs = append(errs, fmt.Errorf("%s: [Secrets] section should have been stripped", source))
+	}
+
 	return errs
 }
 
