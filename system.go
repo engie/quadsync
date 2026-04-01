@@ -173,6 +173,7 @@ func runAsUserStdin(timeout time.Duration, username Username, shellCmd, stdin st
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "runuser", "-s", "/bin/sh", string(username), "-c", shellCmd)
+	cmd.Dir = "/"
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
