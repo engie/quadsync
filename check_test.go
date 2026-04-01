@@ -60,6 +60,17 @@ func TestCheckContent(t *testing.T) {
 			t.Fatalf("unexpected error: %v", errs[0])
 		}
 	})
+
+	t.Run("file secret name collision rejected", func(t *testing.T) {
+		content := "[Container]\nImage=nginx\n\n[Secrets]\nFile=/run/secrets/api-key:aGVsbG8=\nFile=/run/secrets/api_key:d29ybGQ=\n"
+		errs := checkContent("myapp", content, "test")
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %v", errs)
+		}
+		if !strings.Contains(errs[0].Error(), "collides with") {
+			t.Fatalf("unexpected error: %v", errs[0])
+		}
+	})
 }
 
 func TestCheckPodContent(t *testing.T) {

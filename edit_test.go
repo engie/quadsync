@@ -123,3 +123,21 @@ func TestEditContainerFileDecryptsEncryptedSecretsIntoScratch(t *testing.T) {
 		t.Fatalf("expected edit to succeed, got %v", err)
 	}
 }
+
+func TestEditContainerFileRejectsCollidingFileSecrets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "app.container")
+	content := "[Container]\nImage=nginx:latest\n\n[Secrets]\nFile=/run/secrets/api-key:aGVsbG8=\nFile=/run/secrets/api_key:d29ybGQ=\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("EDITOR", "true")
+	err := editContainerFile(path, "")
+	if err == nil {
+		t.Fatal("expected collision error, got nil")
+	}
+	if !strings.Contains(err.Error(), "collides with") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

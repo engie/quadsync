@@ -45,6 +45,9 @@ func parseSecrets(ini *INIFile, ageKeyFile string) ([]SecretEntry, error) {
 	if sec == nil {
 		return nil, nil
 	}
+	if err := validateSecretsSection(ini); err != nil {
+		return nil, err
+	}
 
 	var secrets []SecretEntry
 	for _, e := range sec.Entries {
@@ -61,6 +64,55 @@ func parseSecrets(ini *INIFile, ageKeyFile string) ([]SecretEntry, error) {
 		return nil, nil
 	}
 	return secrets, nil
+}
+
+func validateSecretsSection(ini *INIFile) error {
+	sec := ini.GetSection(sectionSecrets)
+	if sec == nil {
+		return nil
+	}
+
+	fileTargetsByName := map[string]string{}
+	for _, entry := range sec.Entries {
+		if entry.Key == "" {
+			continue
+		}
+		switch entry.Key {
+		case secretKeyEnvironment:
+			name, payload, err := splitEnvironmentSecret(entry.Value)
+			if err != nil {
+				return fmt.Errorf("secret %q: %w", entry.Key, err)
+			}
+			if !validSecretName.MatchString(name) {
+				return fmt.Errorf("secret %q: invalid secret name %q: must match [A-Za-z_][A-Za-z0-9_]*", entry.Key, name)
+			}
+			if payload == "" {
+				return fmt.Errorf("secret %q: empty environment value", entry.Key)
+			}
+		case secretKeyFile:
+			name, target, payload, err := splitFileSecret(entry.Value)
+			if err != nil {
+				return fmt.Errorf("secret %q: %w", entry.Key, err)
+			}
+			if !validSecretName.MatchString(name) {
+				return fmt.Errorf("secret %q: invalid secret name %q: must match [A-Za-z_][A-Za-z0-9_]*", entry.Key, name)
+			}
+			if target == "" {
+				return fmt.Errorf("secret %q: empty file target path", entry.Key)
+			}
+			if payload == "" {
+				return fmt.Errorf("secret %q: empty file value", entry.Key)
+			}
+			if prevTarget, exists := fileTargetsByName[name]; exists && prevTarget != target {
+				return fmt.Errorf("secret %q: file secret target %q collides with %q (derived name %q)", entry.Key, target, prevTarget, name)
+			}
+			fileTargetsByName[name] = target
+		default:
+			return fmt.Errorf("secret %q: unknown secret directive %q (expected %s or %s)", entry.Key, entry.Key, secretKeyEnvironment, secretKeyFile)
+		}
+	}
+
+	return nil
 }
 
 // parseSecretEntry parses one [Secrets] entry in repeated-key form.
@@ -129,17 +181,35 @@ func splitEnvironmentSecret(value string) (string, string, error) {
 }
 
 func splitFileSecret(value string) (string, string, string, error) {
-	parts := strings.SplitN(value, ":", 3)
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("file secret requires format NAME:<target>:<base64-value>")
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return "", "", "", fmt.Errorf("file secret requires format <target>:<base64-value>")
 	}
-	name := parts[0]
-	target := parts[1]
-	payload := parts[2]
+	target := parts[0]
+	if target == "" {
+		return "", "", "", fmt.Errorf("empty file target path")
+	}
+	return deriveFileSecretName(target), target, parts[1], nil
+}
+
+func deriveFileSecretName(target string) string {
+	var b strings.Builder
+	for _, r := range target {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := strings.Trim(b.String(), "_")
 	if name == "" {
-		return "", "", "", fmt.Errorf("empty file secret name")
+		return "_"
 	}
-	return name, target, payload, nil
+	if name[0] >= '0' && name[0] <= '9' {
+		name = "_" + name
+	}
+	return name
 }
 
 // encryptSecretsInPlace rewrites plaintext [Secrets] entries into inline age
@@ -148,6 +218,9 @@ func encryptSecretsInPlace(ini *INIFile, key AgeKeyMaterial) error {
 	sec := ini.GetSection(sectionSecrets)
 	if sec == nil {
 		return nil
+	}
+	if err := validateSecretsSection(ini); err != nil {
+		return err
 	}
 	for i := range sec.Entries {
 		if sec.Entries[i].Key == "" {
@@ -195,7 +268,7 @@ func encryptSecretsInPlace(ini *INIFile, key AgeKeyMaterial) error {
 			if err != nil {
 				return fmt.Errorf("secret %q: %w", sec.Entries[i].Key, err)
 			}
-			sec.Entries[i].Value = name + ":" + target + ":" + encrypted
+			sec.Entries[i].Value = target + ":" + encrypted
 		default:
 			return fmt.Errorf("secret %q: unknown secret directive %q (expected %s or %s)", sec.Entries[i].Key, sec.Entries[i].Key, secretKeyEnvironment, secretKeyFile)
 		}
@@ -209,6 +282,9 @@ func decryptSecretsInPlace(ini *INIFile, ageKeyFile string) error {
 	sec := ini.GetSection(sectionSecrets)
 	if sec == nil {
 		return nil
+	}
+	if err := validateSecretsSection(ini); err != nil {
+		return err
 	}
 	for i := range sec.Entries {
 		if sec.Entries[i].Key == "" {
@@ -229,7 +305,7 @@ func decryptSecretsInPlace(ini *INIFile, ageKeyFile string) error {
 			}
 			sec.Entries[i].Value = name + "=" + decrypted
 		case secretKeyFile:
-			name, target, payload, err := splitFileSecret(sec.Entries[i].Value)
+			_, target, payload, err := splitFileSecret(sec.Entries[i].Value)
 			if err != nil {
 				return fmt.Errorf("secret %q: %w", sec.Entries[i].Key, err)
 			}
@@ -240,7 +316,7 @@ func decryptSecretsInPlace(ini *INIFile, ageKeyFile string) error {
 			if err != nil {
 				return fmt.Errorf("secret %q: %w", sec.Entries[i].Key, err)
 			}
-			sec.Entries[i].Value = name + ":" + target + ":" + base64.StdEncoding.EncodeToString([]byte(decrypted))
+			sec.Entries[i].Value = target + ":" + base64.StdEncoding.EncodeToString([]byte(decrypted))
 		default:
 			continue
 		}

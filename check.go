@@ -205,6 +205,9 @@ func checkContent(name, content, source string) []error {
 	if err != nil {
 		return []error{fmt.Errorf("%s: parse error: %w", source, err)}
 	}
+	if err := validateSecretsSection(f); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", source, err))
+	}
 
 	// Must have [Container] section with Image=
 	container := f.GetSection("Container")
@@ -227,10 +230,6 @@ func checkContent(name, content, source string) []error {
 				errs = append(errs, fmt.Errorf("%s: ContainerName=%s does not match filename stem %s", source, e.Value, name))
 			}
 		}
-	}
-
-	if f.GetSection(sectionSecrets) != nil {
-		errs = append(errs, fmt.Errorf("%s: [Secrets] section should have been stripped", source))
 	}
 
 	return errs
@@ -284,6 +283,10 @@ func checkContentPostMerge(name, content, source string) []error {
 				errs = append(errs, fmt.Errorf("%s: ContainerName=%s does not match filename stem %s", source, e.Value, name))
 			}
 		}
+	}
+
+	if f.GetSection(sectionSecrets) != nil {
+		errs = append(errs, fmt.Errorf("%s: [Secrets] section should have been stripped", source))
 	}
 
 	return errs

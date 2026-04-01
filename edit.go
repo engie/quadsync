@@ -14,7 +14,7 @@ import (
 
 var runEditor = runEditorCommand
 
-const secretsScaffoldComment = "; Use Environment=NAME=value or File=NAME:/target/path:<base64-value>"
+const secretsScaffoldComment = "; Use Environment=NAME=value or File=/target/path:<base64-value>"
 
 func cmdEdit() {
 	if len(os.Args) != 3 {
@@ -62,6 +62,9 @@ func editContainerFile(filePath, ageKeyFile string) error {
 	if err != nil {
 		return fmt.Errorf("parsing %s: %w", absPath, err)
 	}
+	if err := validateSecretsSection(ini); err != nil {
+		return fmt.Errorf("validating %s: %w", absPath, err)
+	}
 	if err := decryptSecretsInPlace(ini, ageKeyFile); err != nil {
 		return fmt.Errorf("decrypting %s: %w", absPath, err)
 	}
@@ -95,6 +98,9 @@ func editContainerFile(filePath, ageKeyFile string) error {
 	editedINI, err := ParseINI(bytes.NewReader(edited))
 	if err != nil {
 		return fmt.Errorf("parsing edited %s: %w", absPath, err)
+	}
+	if err := validateSecretsSection(editedINI); err != nil {
+		return fmt.Errorf("validating edited %s: %w", absPath, err)
 	}
 
 	hasSecrets := editedINI.GetSection(sectionSecrets) != nil

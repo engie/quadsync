@@ -121,13 +121,13 @@ Image=registry.example.com/planning-webapp:latest
 
 [Secrets]
 Environment=DATABASE_URL=postgres://admin:s3cret@db.internal:5432/planning
-File=TLS_CERT:/run/secrets/tls.cert:aGVsbG8gd29ybGQ=
+File=/run/secrets/tls.cert:aGVsbG8gd29ybGQ=
 ```
 
 Secret value formats:
 
 - `Environment=NAME=value` injects a Podman secret as an environment variable named `NAME`
-- `File=NAME:<target>:<base64-value>` mounts a Podman secret at `<target>`; the stored payload is the base64-decoded value
+- `File=<target>:<base64-value>` mounts a Podman secret at `<target>`; quadsync derives an internal secret name from the target path and stores the base64-decoded value
 
 After `quadsync edit` or any other re-encryption path, each secret value is stored inline as compact age ciphertext with the recipient embedded in the value. During `quadsync sync`:
 
