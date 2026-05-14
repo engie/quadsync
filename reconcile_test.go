@@ -452,6 +452,136 @@ func TestBuildDesiredRootPod(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredWithSidecars(t *testing.T) {
+	t.Run("standalone with sidecars", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"),
+			[]byte("[Container]\nImage=lib\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.service"),
+			[]byte("[Service]\nExecStart=/bin/true\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		desired, err := buildDesired(dir, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("buildDesired: %v", err)
+		}
+		state, ok := desired["library"]
+		if !ok {
+			t.Fatal("missing 'library' in desired")
+		}
+		if _, ok := state.Files["library-refresh.service"]; !ok {
+			t.Errorf("missing library-refresh.service in DesiredState; have %v", keysOf(state.Files))
+		}
+		if _, ok := state.Files["library-refresh.timer"]; !ok {
+			t.Errorf("missing library-refresh.timer in DesiredState; have %v", keysOf(state.Files))
+		}
+	})
+
+	t.Run("pod member sidecar attaches to pod state", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "tailscale")
+		os.Mkdir(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "webapp.pod"), []byte("[Pod]\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web.container"),
+			[]byte("[Container]\nImage=nginx\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web-refresh.service"),
+			[]byte("[Service]\nExecStart=/bin/true\n"), 0644)
+
+		tr := Transforms{
+			DirContainer: map[string]*INIFile{},
+			DirPod:       map[string]*INIFile{},
+		}
+		desired, err := buildDesiredFull(dir, tr)
+		if err != nil {
+			t.Fatalf("buildDesiredFull: %v", err)
+		}
+		state, ok := desired["webapp"]
+		if !ok {
+			t.Fatal("missing 'webapp' in desired")
+		}
+		if _, ok := state.Files["webapp-web-refresh.service"]; !ok {
+			t.Errorf("expected service in webapp pod state; have %v", keysOf(state.Files))
+		}
+		if _, ok := state.Files["webapp-web-refresh.timer"]; !ok {
+			t.Errorf("expected timer in webapp pod state; have %v", keysOf(state.Files))
+		}
+	})
+
+	t.Run("orphan sidecar fails build", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "other.container"),
+			[]byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		_, err := buildDesired(dir, nil, nil, nil)
+		if err == nil {
+			t.Fatal("expected build error for orphan sidecar")
+		}
+		if !strings.Contains(err.Error(), "has no matching") {
+			t.Fatalf("expected orphan error, got: %v", err)
+		}
+	})
+
+	t.Run("sidecar content changes the hash", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"),
+			[]byte("[Container]\nImage=lib\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.service"),
+			[]byte("[Service]\nExecStart=/bin/true\n"), 0644)
+
+		d1, err := buildDesired(dir, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h1 := compositeHash(d1["library"])
+
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=04:00\n"), 0644)
+		d2, err := buildDesired(dir, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h2 := compositeHash(d2["library"])
+
+		if h1 == h2 {
+			t.Fatal("expected hash change after sidecar edit")
+		}
+	})
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func TestUserFileDir(t *testing.T) {
+	cases := []struct {
+		filename string
+		want     string
+	}{
+		{"library.container", quadletDir},
+		{"webapp.pod", quadletDir},
+		{"library-data.volume", quadletDir},
+		{"library-refresh.service", userUnitDir},
+		{"library-refresh.timer", userUnitDir},
+	}
+	for _, c := range cases {
+		got := userFileDir(c.filename)
+		if got != c.want {
+			t.Errorf("userFileDir(%q) = %q, want %q", c.filename, got, c.want)
+		}
+	}
+}
+
 func TestBuildDesiredSubdirNoPodNoTransformAllowed(t *testing.T) {
 	// Subdir with pods but no dir container transform — should work (members get only base)
 	dir := t.TempDir()

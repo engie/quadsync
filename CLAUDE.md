@@ -37,9 +37,15 @@ All code is in the `main` package (flat structure, no sub-packages). Zero extern
 **Sync workflow (reconcile.go:Sync):**
 1. Git clone or fetch+reset the configured repo
 2. Load transform files from `/etc/quadsync/transforms/`
-3. Build desired state: root-level `.container` files used as-is; subdirectory `.container` files get merged with the matching transform
-4. For each container: create user if needed → skip if content hash unchanged → write quadlet → daemon-reload → restart
-5. Clean up removed containers: stop service → remove quadlet → delete user
+3. Build desired state: root-level `.container` files used as-is; subdirectory `.container` files get merged with the matching transform; sibling `.service`/`.timer` files are attached as sidecars by filename prefix
+4. For each container: create user if needed → skip if content hash unchanged → prune stale sidecars → write files → daemon-reload → enable timers → restart service
+5. Clean up removed containers: disable timers → stop service → remove quadlets and user units → delete user
+
+**File layout in the per-container user's home:**
+- `~/.config/containers/systemd/` — Podman quadlet files (`.container`, `.pod`, `.volume`, etc.)
+- `~/.config/systemd/user/` — plain systemd unit files (`.service`, `.timer`) — used for sidecar timers since Podman's quadlet generator doesn't process those extensions
+
+**Sidecar timers/services:** A `.service` or `.timer` file in the repo named `<container-stem>-<label>.{service,timer}` is associated with `<container-stem>.container` and deployed under the same user. Longest-prefix match wins (so `webapp-web-refresh.timer` attaches to the `webapp-web` pod member, not the `webapp` pod). Sidecars are deployed verbatim — no transforms, no `{{.Name}}` substitution.
 
 **Configuration** is read from `/etc/quadsync/config.env`:
 - `QUADSYNC_GIT_URL` (required), `QUADSYNC_GIT_BRANCH` (default: "main"), `QUADSYNC_TRANSFORM_DIR`, `QUADSYNC_STATE_DIR`, `QUADSYNC_USER_GROUP`

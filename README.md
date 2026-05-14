@@ -94,6 +94,68 @@ Transform files live on the host at the transform directory (default `/etc/quads
   webapps.container             # applied to all files in repo/webapps/
 ```
 
+## Sidecar timers and services
+
+Podman's quadlet generator does not emit `.timer` units, so there is no
+declarative way to run a scheduled task with a vanilla `.container`. quadsync
+fills that gap: drop a plain `.service` and `.timer` file alongside a
+`.container` in the repo, and they get deployed under the same per-container
+user. Use this when a long-running container needs a periodic task (e.g.
+`podman exec` running a nightly job inside the same container) or to trigger
+the quadlet-generated service on a schedule.
+
+Layout:
+
+```
+repo/
+  library.container
+  library-refresh.service
+  library-refresh.timer
+```
+
+The sidecar association is by filename prefix: `library-refresh.*` belongs
+to `library.container` because the filename begins with `library-`. The
+longest matching `.container` stem wins, so `webapp-web-refresh.timer`
+attaches to the `webapp-web` pod member, not the `webapp` pod.
+
+Sidecars are deployed into `~/.config/systemd/user/` (not the quadlet dir)
+and `enable --now` is run for each timer after `daemon-reload`. Removing
+the files from the repo causes the next `sync` to disable the timer and
+delete the units.
+
+Example oneshot that runs a script inside an already-running container:
+
+```ini
+# library-refresh.service
+[Unit]
+Description=Refresh library cache
+Requires=library.service
+After=library.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/podman exec library python /app/refresh_cache.py
+```
+
+```ini
+# library-refresh.timer
+[Unit]
+Description=Nightly library cache refresh
+
+[Timer]
+OnCalendar=03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+> [!IMPORTANT]
+> Timer-activated services must be `Type=oneshot` *without*
+> `RemainAfterExit=yes`. systemd will not re-trigger a service stuck in the
+> "started" state, so the timer would only ever fire once. See
+> [containers/podman#20364](https://github.com/containers/podman/discussions/20364).
+
 ## Secrets
 
 quadsync can keep secret values inline inside `.container` files without encrypting the rest of the INI. Only keys in a `[Secrets]` section are treated as secrets.

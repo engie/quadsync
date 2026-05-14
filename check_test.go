@@ -200,6 +200,123 @@ func TestCheckDesired(t *testing.T) {
 	})
 }
 
+func TestCheckDirWithSidecars(t *testing.T) {
+	t.Run("standalone container with sidecars validates", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"), []byte("[Container]\nImage=lib\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.service"),
+			[]byte("[Service]\nExecStart=/bin/true\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		errs := CheckDir(dir)
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	t.Run("orphan sidecar at root rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "other.container"), []byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		errs := CheckDir(dir)
+		foundOrphan := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "has no matching <stem>.container") {
+				foundOrphan = true
+			}
+		}
+		if !foundOrphan {
+			t.Fatalf("expected orphan error, got %v", errs)
+		}
+	})
+
+	t.Run("timer missing [Timer] section rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"), []byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"),
+			[]byte("[Unit]\nDescription=oops\n"), 0644)
+
+		errs := CheckDir(dir)
+		foundMissing := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "missing [Timer] section") {
+				foundMissing = true
+			}
+		}
+		if !foundMissing {
+			t.Fatalf("expected missing [Timer] error, got %v", errs)
+		}
+	})
+
+	t.Run("service missing [Service] section rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"), []byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.service"),
+			[]byte("[Unit]\nDescription=oops\n"), 0644)
+
+		errs := CheckDir(dir)
+		foundMissing := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "missing [Service] section") {
+				foundMissing = true
+			}
+		}
+		if !foundMissing {
+			t.Fatalf("expected missing [Service] error, got %v", errs)
+		}
+	})
+
+	t.Run("pod-member sidecar matches longest prefix", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "tailscale")
+		os.Mkdir(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "webapp.pod"), []byte("[Pod]\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web.container"), []byte("[Container]\nImage=nginx\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web-refresh.timer"),
+			[]byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "webapp-web-refresh.service"),
+			[]byte("[Service]\nExecStart=/bin/true\n"), 0644)
+
+		errs := CheckDir(dir)
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+}
+
+func TestFindSidecarOwner(t *testing.T) {
+	t.Run("longest prefix wins", func(t *testing.T) {
+		stems := []string{"webapp", "webapp-web"}
+		owner, ok := findSidecarOwner("/tmp/webapp-web-refresh.timer", stems)
+		if !ok {
+			t.Fatal("expected match")
+		}
+		if owner != "webapp-web" {
+			t.Fatalf("expected webapp-web, got %s", owner)
+		}
+	})
+
+	t.Run("no match returns false", func(t *testing.T) {
+		stems := []string{"library", "webapp"}
+		_, ok := findSidecarOwner("/tmp/nginx-refresh.timer", stems)
+		if ok {
+			t.Fatal("expected no match")
+		}
+	})
+
+	t.Run("bare stem requires hyphen-suffix to match", func(t *testing.T) {
+		// Sidecar "library.timer" should NOT match "library.container" — no
+		// "-suffix" terminator means the timer isn't a labelled sidecar.
+		stems := []string{"library"}
+		if _, ok := findSidecarOwner("/tmp/library.timer", stems); ok {
+			t.Fatal("expected library.timer to be orphan (no -suffix)")
+		}
+	})
+}
+
 func TestCheckDirWithPods(t *testing.T) {
 	t.Run("orphan container in pod dir errors", func(t *testing.T) {
 		dir := t.TempDir()
@@ -242,15 +359,15 @@ func TestDiscoverContainers(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "app.container"), []byte("[Container]\nImage=x\n"), 0644)
 		os.WriteFile(filepath.Join(dir, "web.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, rootPods, subdirs, err := discoverContainers(dir)
+		root, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 2 {
-			t.Fatalf("expected 2 root files, got %d", len(root))
+		if len(root.Containers) != 2 {
+			t.Fatalf("expected 2 root containers, got %d", len(root.Containers))
 		}
-		if len(rootPods) != 0 {
-			t.Fatalf("expected 0 root pods, got %d", len(rootPods))
+		if len(root.Pods) != 0 {
+			t.Fatalf("expected 0 root pods, got %d", len(root.Pods))
 		}
 		if len(subdirs) != 0 {
 			t.Fatalf("expected 0 subdirs, got %d", len(subdirs))
@@ -262,15 +379,15 @@ func TestDiscoverContainers(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "webapp.pod"), []byte("[Pod]\n"), 0644)
 		os.WriteFile(filepath.Join(dir, "webapp-web.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, rootPods, _, err := discoverContainers(dir)
+		root, _, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 1 {
-			t.Fatalf("expected 1 root container, got %d", len(root))
+		if len(root.Containers) != 1 {
+			t.Fatalf("expected 1 root container, got %d", len(root.Containers))
 		}
-		if len(rootPods) != 1 {
-			t.Fatalf("expected 1 root pod, got %d", len(rootPods))
+		if len(root.Pods) != 1 {
+			t.Fatalf("expected 1 root pod, got %d", len(root.Pods))
 		}
 	})
 
@@ -280,12 +397,12 @@ func TestDiscoverContainers(t *testing.T) {
 		os.Mkdir(sub, 0755)
 		os.WriteFile(filepath.Join(sub, "svc.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, _, subdirs, err := discoverContainers(dir)
+		root, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 0 {
-			t.Fatalf("expected 0 root files, got %d", len(root))
+		if len(root.Containers) != 0 {
+			t.Fatalf("expected 0 root containers, got %d", len(root.Containers))
 		}
 		if len(subdirs) != 1 {
 			t.Fatalf("expected 1 subdir, got %d", len(subdirs))
@@ -303,7 +420,7 @@ func TestDiscoverContainers(t *testing.T) {
 		os.WriteFile(filepath.Join(sub, "webapp.pod"), []byte("[Pod]\n"), 0644)
 		os.WriteFile(filepath.Join(sub, "webapp-web.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		_, _, subdirs, err := discoverContainers(dir)
+		_, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -322,12 +439,12 @@ func TestDiscoverContainers(t *testing.T) {
 		os.Mkdir(dot, 0755)
 		os.WriteFile(filepath.Join(dot, "config.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, _, subdirs, err := discoverContainers(dir)
+		root, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 0 {
-			t.Fatalf("expected 0 root files, got %d", len(root))
+		if len(root.Containers) != 0 {
+			t.Fatalf("expected 0 root containers, got %d", len(root.Containers))
 		}
 		if len(subdirs) != 0 {
 			t.Fatalf("expected 0 subdirs, got %d", len(subdirs))
@@ -340,12 +457,12 @@ func TestDiscoverContainers(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "app.volume"), []byte("[Volume]\n"), 0644)
 		os.WriteFile(filepath.Join(dir, "svc.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, _, _, err := discoverContainers(dir)
+		root, _, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 1 {
-			t.Fatalf("expected 1 root file, got %d", len(root))
+		if len(root.Containers) != 1 {
+			t.Fatalf("expected 1 root container, got %d", len(root.Containers))
 		}
 	})
 
@@ -355,12 +472,12 @@ func TestDiscoverContainers(t *testing.T) {
 		os.MkdirAll(deep, 0755)
 		os.WriteFile(filepath.Join(deep, "deep.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, _, subdirs, err := discoverContainers(dir)
+		root, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 0 {
-			t.Fatalf("expected 0 root files, got %d", len(root))
+		if len(root.Containers) != 0 {
+			t.Fatalf("expected 0 root containers, got %d", len(root.Containers))
 		}
 		// "a" subdir is found but "b" inside it is not — only one level
 		if specs, ok := subdirs["a"]; ok {
@@ -378,12 +495,12 @@ func TestDiscoverContainers(t *testing.T) {
 		os.WriteFile(filepath.Join(sub, "api.container"), []byte("[Container]\nImage=x\n"), 0644)
 		os.WriteFile(filepath.Join(sub, "web.container"), []byte("[Container]\nImage=x\n"), 0644)
 
-		root, _, subdirs, err := discoverContainers(dir)
+		root, subdirs, err := discoverContainers(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(root) != 1 {
-			t.Fatalf("expected 1 root file, got %d", len(root))
+		if len(root.Containers) != 1 {
+			t.Fatalf("expected 1 root container, got %d", len(root.Containers))
 		}
 		specs := subdirs["prod"]
 		if len(specs.Containers) != 2 {
@@ -397,6 +514,42 @@ func TestDiscoverContainers(t *testing.T) {
 		sort.Strings(names)
 		if names[0] != "api.container" || names[1] != "web.container" {
 			t.Fatalf("unexpected files: %v", names)
+		}
+	})
+
+	t.Run("sidecars discovered at root", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "library.container"), []byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.service"), []byte("[Service]\nExecStart=/bin/true\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "library-refresh.timer"), []byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		root, _, err := discoverContainers(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(root.Services) != 1 || filepath.Base(root.Services[0]) != "library-refresh.service" {
+			t.Fatalf("expected library-refresh.service in root, got %v", root.Services)
+		}
+		if len(root.Timers) != 1 || filepath.Base(root.Timers[0]) != "library-refresh.timer" {
+			t.Fatalf("expected library-refresh.timer in root, got %v", root.Timers)
+		}
+	})
+
+	t.Run("sidecars discovered in subdir", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "tailscale")
+		os.Mkdir(sub, 0755)
+		os.WriteFile(filepath.Join(sub, "library.container"), []byte("[Container]\nImage=x\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "library-refresh.service"), []byte("[Service]\nExecStart=/bin/true\n"), 0644)
+		os.WriteFile(filepath.Join(sub, "library-refresh.timer"), []byte("[Timer]\nOnCalendar=03:00\n"), 0644)
+
+		_, subdirs, err := discoverContainers(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		specs := subdirs["tailscale"]
+		if len(specs.Services) != 1 || len(specs.Timers) != 1 {
+			t.Fatalf("expected 1 service and 1 timer in subdir, got services=%v timers=%v", specs.Services, specs.Timers)
 		}
 	})
 }

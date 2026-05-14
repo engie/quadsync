@@ -241,6 +241,9 @@ func Sync(config Config) error {
 			errs = append(errs, fmt.Errorf("waiting for user manager %s: %w", name, err))
 			continue
 		}
+		// Prune any .service/.timer in the user-unit dir that are no longer
+		// in DesiredState. Best-effort — failures are logged inside.
+		pruneUserUnits(name, state.Files)
 		if len(state.Secrets) > 0 {
 			if err := createPodmanSecrets(name, state.Secrets); err != nil {
 				log.Printf("error creating secrets for %s: %v", name, err)
@@ -252,6 +255,15 @@ func Sync(config Config) error {
 			log.Printf("error daemon-reload for %s: %v", name, err)
 			errs = append(errs, fmt.Errorf("daemon-reload for %s: %w", name, err))
 			continue
+		}
+
+		// Enable+start any timers in DesiredState. Idempotent.
+		for filename := range state.Files {
+			if strings.HasSuffix(filename, ".timer") {
+				if err := enableTimer(name, filename); err != nil {
+					log.Printf("warning: enabling %s for %s: %v", filename, name, err)
+				}
+			}
 		}
 
 		// Quadlet is written and systemd knows about it — quadsync's job
@@ -272,6 +284,18 @@ func Sync(config Config) error {
 	for _, name := range current {
 		if _, exists := desired[name]; !exists {
 			log.Printf("%s: removing", name)
+			// Disable any timers before the user manager goes away.
+			if units, err := listUserUnitFiles(name); err == nil {
+				for _, u := range units {
+					if strings.HasSuffix(u, ".timer") {
+						if err := disableTimer(name, u); err != nil {
+							log.Printf("warning: disabling %s for %s: %v", u, name, err)
+						}
+					}
+				}
+			} else {
+				log.Printf("warning: listing user units for %s: %v", name, err)
+			}
 			if err := stopService(name, string(name)); err != nil {
 				log.Printf("warning: stopping %s: %v", name, err)
 			}
@@ -409,14 +433,19 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 	desired := map[Username]DesiredState{}
 	sources := map[Username]string{} // name → source path (for collision detection)
 
-	rootContainers, rootPods, subdirSpecs, err := discoverContainers(repoPath)
+	rootScope, subdirSpecs, err := discoverContainers(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rootSidecars, err := groupSidecarsByOwner(rootScope, dirNameRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build set of root pod stems to identify pod members
 	rootPodStems := map[string]string{} // stem → pod file path
-	for _, f := range rootPods {
+	for _, f := range rootScope.Pods {
 		stem := strings.TrimSuffix(filepath.Base(f), ".pod")
 		rootPodStems[stem] = f
 	}
@@ -424,7 +453,7 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 	// Group root containers by pod membership
 	rootStandalone := []string{}
 	rootPodMembers := map[string][]string{} // pod stem → member files
-	for _, f := range rootContainers {
+	for _, f := range rootScope.Containers {
 		name := strings.TrimSuffix(filepath.Base(f), ".container")
 		memberOf := ""
 		for stem := range rootPodStems {
@@ -450,7 +479,11 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 		if err != nil {
 			return nil, err
 		}
-		desired[name] = buildDesiredState(name, content, t.Companions, secrets)
+		state := buildDesiredState(name, content, t.Companions, secrets)
+		if err := addSidecarFiles(state.Files, rootSidecars[string(name)]); err != nil {
+			return nil, err
+		}
+		desired[name] = state
 		sources[name] = f
 	}
 
@@ -464,7 +497,7 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 			return nil, fmt.Errorf("duplicate name %q: %s and %s", name, prev, podFile)
 		}
 		members := rootPodMembers[stem]
-		state, err := buildPodDesired(stem, podFile, members, t, nil)
+		state, err := buildPodDesired(stem, podFile, members, t, nil, rootSidecars)
 		if err != nil {
 			return nil, err
 		}
@@ -474,6 +507,11 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 
 	// Subdirectories
 	for dirName, specs := range subdirSpecs {
+		sidecarsByOwner, err := groupSidecarsByOwner(specs, dirName)
+		if err != nil {
+			return nil, err
+		}
+
 		if len(specs.Pods) == 0 {
 			// No pods — all containers are standalone
 			dirTransform := t.DirContainer[dirName]
@@ -493,7 +531,11 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 				if err != nil {
 					return nil, err
 				}
-				desired[name] = buildDesiredState(name, content, t.Companions, secrets)
+				state := buildDesiredState(name, content, t.Companions, secrets)
+				if err := addSidecarFiles(state.Files, sidecarsByOwner[string(name)]); err != nil {
+					return nil, err
+				}
+				desired[name] = state
 				sources[name] = f
 			}
 			continue
@@ -531,7 +573,7 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 				return nil, fmt.Errorf("duplicate name %q: %s and %s", name, prev, podFile)
 			}
 			members := podMembers[stem]
-			state, err := buildPodDesired(stem, podFile, members, t, &dirName)
+			state, err := buildPodDesired(stem, podFile, members, t, &dirName, sidecarsByOwner)
 			if err != nil {
 				return nil, err
 			}
@@ -541,6 +583,38 @@ func buildDesiredFull(repoPath string, t Transforms) (map[Username]DesiredState,
 	}
 
 	return desired, nil
+}
+
+const dirNameRoot = "root"
+
+// groupSidecarsByOwner buckets sidecar files in a scope under the container
+// stem that owns them (longest-prefix match against .container stems in the
+// same scope). Returns an error if any sidecar has no owner.
+func groupSidecarsByOwner(specs SubdirSpecs, dirName string) (map[string][]string, error) {
+	stems := containerStemsOf(specs.Containers)
+	out := map[string][]string{}
+	for _, f := range append(append([]string{}, specs.Services...), specs.Timers...) {
+		owner, ok := findSidecarOwner(f, stems)
+		if !ok {
+			return nil, fmt.Errorf("%s: sidecar in %s has no matching <stem>.container", f, dirName)
+		}
+		out[owner] = append(out[owner], f)
+	}
+	return out, nil
+}
+
+// addSidecarFiles reads each sidecar from disk and adds its content to files,
+// keyed by basename. Sidecars are deployed verbatim — no transforms, no
+// template substitution.
+func addSidecarFiles(files map[string]string, sidecars []string) error {
+	for _, f := range sidecars {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("reading sidecar %s: %w", f, err)
+		}
+		files[filepath.Base(f)] = string(data)
+	}
+	return nil
 }
 
 // transformContainerFile reads and applies transforms to a container file.
@@ -579,8 +653,10 @@ func transformContainerFile(path string, base, dirTransform *INIFile, ageKeyFile
 }
 
 // buildPodDesired builds a DesiredState for a pod and its members.
-// dirName is nil for root-level pods.
-func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms, dirName *string) (DesiredState, error) {
+// dirName is nil for root-level pods. sidecarsByOwner maps a container stem
+// (pod member) to its sidecar file paths; matching sidecars are added to the
+// pod's DesiredState files map.
+func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms, dirName *string, sidecarsByOwner map[string][]string) (DesiredState, error) {
 	files := map[string]string{}
 	var allSecrets []ContainerSecret
 
@@ -655,6 +731,10 @@ func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms
 			files[companionFilename] = companionContent
 		}
 
+		// Attach .service/.timer sidecars owned by this member.
+		if err := addSidecarFiles(files, sidecarsByOwner[memberFullName]); err != nil {
+			return DesiredState{}, err
+		}
 	}
 
 	if len(memberFiles) == 0 {

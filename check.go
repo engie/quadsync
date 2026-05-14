@@ -36,80 +36,120 @@ func NewPodUsername(s string) (Username, error) {
 	return Username(s), nil
 }
 
-// SubdirSpecs holds discovered container and pod files in a subdirectory.
+// SubdirSpecs holds discovered container, pod, and sidecar files in a scope
+// (root of the repo or a single non-dot subdirectory).
 type SubdirSpecs struct {
 	Containers []string
 	Pods       []string
+	Services   []string // *.service (plain systemd unit, sidecar of a .container)
+	Timers     []string // *.timer (plain systemd unit, sidecar of a .container)
 }
 
-// discoverContainers finds deployable .container and .pod files using the same
-// two-level layout that buildDesired uses: root-level files and one level of
-// non-dot subdirectories.
-func discoverContainers(repoPath string) (rootContainers []string, rootPods []string, subdirs map[string]SubdirSpecs, err error) {
+// discoverContainers finds deployable files using the same two-level layout
+// that buildDesired uses: root-level files and one level of non-dot
+// subdirectories. Returns the root scope and a map of subdirectory scopes.
+func discoverContainers(repoPath string) (root SubdirSpecs, subdirs map[string]SubdirSpecs, err error) {
 	subdirs = map[string]SubdirSpecs{}
 
-	rootContainers, err = filepath.Glob(filepath.Join(repoPath, "*.container"))
+	root, err = globScope(repoPath)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	rootPods, err = filepath.Glob(filepath.Join(repoPath, "*.pod"))
-	if err != nil {
-		return nil, nil, nil, err
+		return SubdirSpecs{}, nil, err
 	}
 
 	entries, err := os.ReadDir(repoPath)
 	if err != nil {
-		return nil, nil, nil, err
+		return SubdirSpecs{}, nil, err
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		dirName := entry.Name()
-		containerFiles, err := filepath.Glob(filepath.Join(repoPath, dirName, "*.container"))
+		spec, err := globScope(filepath.Join(repoPath, dirName))
 		if err != nil {
-			return nil, nil, nil, err
+			return SubdirSpecs{}, nil, err
 		}
-		podFiles, err := filepath.Glob(filepath.Join(repoPath, dirName, "*.pod"))
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if len(containerFiles) > 0 || len(podFiles) > 0 {
-			subdirs[dirName] = SubdirSpecs{
-				Containers: containerFiles,
-				Pods:       podFiles,
-			}
+		if len(spec.Containers) > 0 || len(spec.Pods) > 0 || len(spec.Services) > 0 || len(spec.Timers) > 0 {
+			subdirs[dirName] = spec
 		}
 	}
 
-	return rootContainers, rootPods, subdirs, nil
+	return root, subdirs, nil
 }
 
-// CheckDir validates all .container and .pod files in a directory.
-// Returns a list of errors found.
+// globScope finds all deployable files in a single directory (no recursion).
+func globScope(dir string) (SubdirSpecs, error) {
+	var spec SubdirSpecs
+	var err error
+	if spec.Containers, err = filepath.Glob(filepath.Join(dir, "*.container")); err != nil {
+		return SubdirSpecs{}, err
+	}
+	if spec.Pods, err = filepath.Glob(filepath.Join(dir, "*.pod")); err != nil {
+		return SubdirSpecs{}, err
+	}
+	if spec.Services, err = filepath.Glob(filepath.Join(dir, "*.service")); err != nil {
+		return SubdirSpecs{}, err
+	}
+	if spec.Timers, err = filepath.Glob(filepath.Join(dir, "*.timer")); err != nil {
+		return SubdirSpecs{}, err
+	}
+	return spec, nil
+}
+
+// findSidecarOwner returns the container stem that owns the given sidecar
+// file by longest-prefix match. The match rule is: the sidecar's
+// filename-without-extension starts with "<stem>-" for some stem in
+// containerStems. The longest such stem wins. Returns ("", false) if no
+// container claims the sidecar.
+func findSidecarOwner(sidecarFile string, containerStems []string) (string, bool) {
+	stem := strings.TrimSuffix(filepath.Base(sidecarFile), filepath.Ext(sidecarFile))
+	best := ""
+	for _, c := range containerStems {
+		if strings.HasPrefix(stem, c+"-") && len(c) > len(best) {
+			best = c
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
+// containerStemsOf extracts ".container" stems from a slice of file paths.
+func containerStemsOf(containerFiles []string) []string {
+	stems := make([]string, 0, len(containerFiles))
+	for _, f := range containerFiles {
+		stems = append(stems, strings.TrimSuffix(filepath.Base(f), ".container"))
+	}
+	return stems
+}
+
+// CheckDir validates all .container, .pod, .service, and .timer files in a
+// directory. Returns a list of errors found.
 func CheckDir(dir string) []error {
 	var errs []error
 
-	rootContainers, rootPods, subdirs, err := discoverContainers(dir)
+	root, subdirs, err := discoverContainers(dir)
 	if err != nil {
 		return []error{fmt.Errorf("reading directory %s: %w", dir, err)}
 	}
 
-	// Validate root-level containers (standalone)
-	for _, f := range rootContainers {
+	// Root scope: containers are standalone. Sidecars must match a root container.
+	for _, f := range root.Containers {
 		errs = append(errs, checkFile(f, false)...)
 	}
-	// Validate root-level pods
-	for _, f := range rootPods {
+	for _, f := range root.Pods {
 		errs = append(errs, checkPodFile(f)...)
 	}
+	errs = append(errs, checkSidecars(root, "root", containerStemsOf(root.Containers))...)
 
 	for dirName, specs := range subdirs {
 		if len(specs.Pods) == 0 {
-			// No pods — all containers are standalone
+			// No pods — all containers are standalone; sidecars match any container in the subdir.
 			for _, f := range specs.Containers {
 				errs = append(errs, checkFile(f, false)...)
 			}
+			errs = append(errs, checkSidecars(specs, dirName, containerStemsOf(specs.Containers))...)
 			continue
 		}
 
@@ -137,8 +177,50 @@ func CheckDir(dir string) []error {
 			}
 			errs = append(errs, checkFile(f, true)...)
 		}
+
+		// Sidecars in a pod subdir must match a member container.
+		errs = append(errs, checkSidecars(specs, dirName, containerStemsOf(specs.Containers))...)
 	}
 
+	return errs
+}
+
+// checkSidecars validates .service and .timer files in a scope: each must
+// parse, have the right section, and match a .container in the scope by
+// filename prefix. dirName is "root" or a subdirectory name (for messages).
+func checkSidecars(specs SubdirSpecs, dirName string, containerStems []string) []error {
+	var errs []error
+	for _, f := range specs.Services {
+		errs = append(errs, checkSidecarFile(f, ".service", "Service", dirName, containerStems)...)
+	}
+	for _, f := range specs.Timers {
+		errs = append(errs, checkSidecarFile(f, ".timer", "Timer", dirName, containerStems)...)
+	}
+	return errs
+}
+
+// checkSidecarFile validates a single sidecar file.
+func checkSidecarFile(path, ext, requiredSection, dirName string, containerStems []string) []error {
+	var errs []error
+
+	if _, ok := findSidecarOwner(path, containerStems); !ok {
+		errs = append(errs, fmt.Errorf("%s: %s in %s has no matching <stem>.container (filename must start with `<container-stem>-`)", path, ext, dirName))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", path, err))
+		return errs
+	}
+
+	f, err := ParseINI(strings.NewReader(string(data)))
+	if err != nil {
+		errs = append(errs, fmt.Errorf("%s: parse error: %w", path, err))
+		return errs
+	}
+	if f.GetSection(requiredSection) == nil {
+		errs = append(errs, fmt.Errorf("%s: missing [%s] section", path, requiredSection))
+	}
 	return errs
 }
 

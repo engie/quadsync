@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -185,24 +186,47 @@ func runAsUserStdin(timeout time.Duration, username Username, shellCmd, stdin st
 	return string(out), nil
 }
 
-// writeQuadletFile writes a single quadlet file to the user's quadlet directory.
-// Runs as the target user to prevent symlink attacks from escalating privileges.
+// quadletDir is the home-relative directory Podman's quadlet generator reads.
+const quadletDir = ".config/containers/systemd"
+
+// userUnitDir is the home-relative directory systemd reads user units from.
+const userUnitDir = ".config/systemd/user"
+
+// userFileDir returns the home-relative directory where a quadsync-managed
+// file belongs, dispatching by extension. Plain systemd unit files
+// (.service/.timer) live in the systemd user-unit dir; everything else
+// (.container, .pod, .volume, etc.) lives in the quadlet dir.
+func userFileDir(filename string) string {
+	switch filepath.Ext(filename) {
+	case ".service", ".timer":
+		return userUnitDir
+	default:
+		return quadletDir
+	}
+}
+
+// writeQuadletFile writes a single managed file to the user's home, choosing
+// the destination directory by extension. Runs as the target user to prevent
+// symlink attacks from escalating privileges.
 func writeQuadletFile(username Username, filename, content string) error {
-	dir := ".config/containers/systemd"
+	dir := userFileDir(filename)
 	shellCmd := fmt.Sprintf("mkdir -p ~/%s && cat > ~/%s/%s", dir, dir, filename)
 	if _, err := runAsUserStdin(defaultTimeout, username, shellCmd, content); err != nil {
-		return fmt.Errorf("writing quadlet %s for %s: %w", filename, username, err)
+		return fmt.Errorf("writing %s for %s: %w", filename, username, err)
 	}
 	return nil
 }
 
-// removeAllQuadlets removes all files from the user's quadlet directory.
-// Runs as the target user to prevent symlink attacks.
+// removeAllQuadlets removes all managed files from the user's home (both the
+// quadlet dir and the systemd user-unit dir). Runs as the target user to
+// prevent symlink attacks.
 func removeAllQuadlets(username Username) error {
-	dir := ".config/containers/systemd"
-	shellCmd := fmt.Sprintf("find ~/%s -maxdepth 1 -type f -delete 2>/dev/null; true", dir)
+	shellCmd := fmt.Sprintf(
+		"find ~/%s ~/%s -maxdepth 1 -type f -delete 2>/dev/null; true",
+		quadletDir, userUnitDir,
+	)
 	if _, err := runAsUser(defaultTimeout, username, shellCmd); err != nil {
-		return fmt.Errorf("removing quadlets for %s: %w", username, err)
+		return fmt.Errorf("removing managed files for %s: %w", username, err)
 	}
 	return nil
 }
@@ -241,6 +265,73 @@ func restartService(username Username, serviceName string) error {
 // stopService stops a user service.
 func stopService(username Username, serviceName string) error {
 	return runUserM(username, "stop", serviceName+".service")
+}
+
+// enableTimer enables and starts a user timer. timerFile is the timer's
+// basename (e.g. "library-refresh.timer"). Idempotent.
+func enableTimer(username Username, timerFile string) error {
+	return runUserM(username, "enable", "--now", timerFile)
+}
+
+// disableTimer stops and disables a user timer. timerFile is the timer's
+// basename. Non-fatal: failures are logged at call sites and not returned
+// since the user manager may be gone (during teardown) or the timer never
+// was active.
+func disableTimer(username Username, timerFile string) error {
+	return runUserM(username, "disable", "--now", timerFile)
+}
+
+// listUserUnitFiles returns the basenames of *.service and *.timer files
+// currently in ~/.config/systemd/user/. Used to detect stale sidecars.
+func listUserUnitFiles(username Username) ([]string, error) {
+	shellCmd := fmt.Sprintf(
+		"find ~/%s -maxdepth 1 -type f \\( -name '*.service' -o -name '*.timer' \\) -printf '%%f\\n' 2>/dev/null; true",
+		userUnitDir,
+	)
+	out, err := runAsUser(defaultTimeout, username, shellCmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing user units for %s: %w", username, err)
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+// pruneUserUnits disables any .timer files in the user's systemd user-unit
+// dir that are not in `desired`, then removes any .service/.timer files not
+// in `desired`. Best-effort: errors are logged but not returned, since the
+// user manager may be in flux and the deploy should continue.
+func pruneUserUnits(username Username, desired map[string]string) {
+	existing, err := listUserUnitFiles(username)
+	if err != nil {
+		log.Printf("warning: listing user units for %s: %v", username, err)
+		return
+	}
+	for _, name := range existing {
+		if _, keep := desired[name]; keep {
+			continue
+		}
+		if strings.HasSuffix(name, ".timer") {
+			if err := disableTimer(username, name); err != nil {
+				log.Printf("warning: disabling stale timer %s for %s: %v", name, username, err)
+			}
+		}
+		// Remove the file regardless (services don't need disable; oneshot is fine to just delete).
+		rmCmd := fmt.Sprintf("rm -f -- ~/%s/%s", userUnitDir, shellQuote(name))
+		if _, err := runAsUser(defaultTimeout, username, rmCmd); err != nil {
+			log.Printf("warning: removing stale user unit %s for %s: %v", name, username, err)
+		}
+	}
+}
+
+// shellQuote returns a single-quoted shell-safe representation of s.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // createPodmanSecrets creates or replaces podman secrets for a user.
