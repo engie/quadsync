@@ -19,7 +19,14 @@ import (
 type CompanionTemplate struct {
 	SuffixAndExt string // e.g. "-litestream.container", "-data.volume"
 	Content      string // raw content with {{.Name}} placeholders
+	NoPod        bool   // if set, the companion does not inherit its member's pod
 }
+
+// noPodDirective marks a companion template that must NOT inherit its member's
+// Pod= (so it keeps default networking instead of the pod's shared netns).
+// Used by sidecars like litestream that reach external services and therefore
+// need the host's DNS rather than a pod's tailnet MagicDNS.
+const noPodDirective = "# quadsync:no-pod"
 
 // ContainerSecret pairs a secret with the container name used when the
 // Secret= directive was injected into the quadlet.
@@ -385,6 +392,7 @@ func loadAllTransforms(dir string) (Transforms, error) {
 			t.Companions = append(t.Companions, CompanionTemplate{
 				SuffixAndExt: suffixAndExt,
 				Content:      string(data),
+				NoPod:        strings.Contains(string(data), noPodDirective),
 			})
 		} else if strings.HasSuffix(name, ".pod") {
 			dirName := strings.TrimSuffix(name, ".pod")
@@ -719,8 +727,10 @@ func buildPodDesired(podStem, podFile string, memberFiles []string, t Transforms
 		for _, c := range t.Companions {
 			companionFilename := memberFullName + c.SuffixAndExt
 			companionContent := strings.ReplaceAll(c.Content, "{{.Name}}", memberFullName)
-			// Inject Pod= into companion .container files
-			if strings.HasSuffix(c.SuffixAndExt, ".container") {
+			// Inject Pod= into companion .container files, unless the
+			// companion opted out via the no-pod directive (e.g. litestream,
+			// which needs default networking + host DNS to reach S3).
+			if strings.HasSuffix(c.SuffixAndExt, ".container") && !c.NoPod {
 				cIni, err := ParseINI(strings.NewReader(companionContent))
 				if err != nil {
 					return DesiredState{}, fmt.Errorf("parsing companion %s: %w", companionFilename, err)

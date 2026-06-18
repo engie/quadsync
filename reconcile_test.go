@@ -350,6 +350,63 @@ func TestBuildDesiredPodWithCompanions(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredPodCompanionNoPod(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "tailscale")
+	os.MkdirAll(sub, 0755)
+
+	os.WriteFile(filepath.Join(sub, "webapp.pod"), []byte("[Pod]\n"), 0644)
+	os.WriteFile(filepath.Join(sub, "webapp-web.container"), []byte("[Container]\nImage=nginx\n"), 0644)
+
+	tr := Transforms{
+		DirContainer: map[string]*INIFile{},
+		DirPod:       map[string]*INIFile{},
+		Companions: []CompanionTemplate{
+			{SuffixAndExt: "-litestream.container", Content: "[Container]\nImage=litestream\n", NoPod: true},
+		},
+	}
+
+	desired, err := buildDesiredFull(dir, tr)
+	if err != nil {
+		t.Fatalf("buildDesiredFull: %v", err)
+	}
+
+	ls, ok := desired["webapp"].Files["webapp-web-litestream.container"]
+	if !ok {
+		t.Fatal("missing webapp-web-litestream.container companion")
+	}
+	// A no-pod companion must NOT inherit the member's pod (it needs default
+	// networking + host DNS to reach external services like S3).
+	if strings.Contains(ls, "Pod=") {
+		t.Errorf("Pod= injected into no-pod companion:\n%s", ls)
+	}
+}
+
+func TestLoadTransformsCompanionNoPodDirective(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "_base-litestream.container"),
+		[]byte("# quadsync:no-pod\n[Container]\nImage=litestream\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "_base-data.volume"),
+		[]byte("[Volume]\n"), 0644)
+
+	_, _, companions, err := loadTransforms(dir)
+	if err != nil {
+		t.Fatalf("loadTransforms: %v", err)
+	}
+	for _, c := range companions {
+		switch c.SuffixAndExt {
+		case "-litestream.container":
+			if !c.NoPod {
+				t.Error("expected NoPod=true for companion with no-pod directive")
+			}
+		case "-data.volume":
+			if c.NoPod {
+				t.Error("expected NoPod=false for companion without directive")
+			}
+		}
+	}
+}
+
 func TestBuildDesiredMultiplePodsInDir(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "pods")
