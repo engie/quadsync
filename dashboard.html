@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quadsync containers</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+  .bar { display: flex; gap: .75rem; align-items: center; margin-bottom: 1rem; }
+  .bar .spacer { flex: 1; }
+  .muted { opacity: .6; font-size: .85rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid rgba(128,128,128,.25); font-size: .9rem; vertical-align: top; }
+  th { font-weight: 600; }
+  td.mono, .mono { font-family: ui-monospace, monospace; font-size: .8rem; }
+  button { font: inherit; padding: .25rem .55rem; border-radius: .4rem; border: 1px solid rgba(128,128,128,.4); background: transparent; cursor: pointer; }
+  button:hover { background: rgba(128,128,128,.15); }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+  .pill { display: inline-block; padding: .1rem .5rem; border-radius: 1rem; font-size: .78rem; }
+  .pill.active { background: rgba(40,160,80,.2); }
+  .pill.failed { background: rgba(200,60,60,.25); }
+  .pill.inactive, .pill.unknown { background: rgba(128,128,128,.2); }
+  .health.healthy { color: #2a9d4a; }
+  .health.unhealthy { color: #c83c3c; }
+  #logs { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+  #logs.show { display: flex; }
+  #logsBox { background: Canvas; width: min(90vw, 1000px); height: 80vh; border-radius: .6rem; display: flex; flex-direction: column; overflow: hidden; }
+  #logsHead { display: flex; align-items: center; gap: .5rem; padding: .6rem .9rem; border-bottom: 1px solid rgba(128,128,128,.3); }
+  #logsHead .spacer { flex: 1; }
+  #logsPre { margin: 0; padding: .9rem; overflow: auto; flex: 1; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .78rem; }
+  #err { color: #c83c3c; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <h1>quadsync containers</h1>
+    <div class="spacer"></div>
+    <span id="status" class="muted"></span>
+    <button id="syncBtn" onclick="doSync()">Sync now</button>
+    <button onclick="refresh()">Refresh</button>
+  </div>
+  <span id="err"></span>
+  <table>
+    <thead>
+      <tr>
+        <th>Container</th><th>State</th><th>Health</th><th>Image</th>
+        <th>Image ID</th><th>Build (hash)</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div id="logs" onclick="if(event.target.id==='logs')hideLogs()">
+    <div id="logsBox">
+      <div id="logsHead">
+        <strong id="logsTitle"></strong>
+        <div class="spacer"></div>
+        <button onclick="hideLogs()">Close</button>
+      </div>
+      <pre id="logsPre"></pre>
+    </div>
+  </div>
+
+<script>
+const ACTIONS = ["restart", "stop", "start", "repull", "redeploy"];
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+function short(s) { return s ? esc(s).slice(0, 19) : ""; }
+
+async function refresh() {
+  setErr("");
+  try {
+    const r = await fetch("api/containers");
+    const data = await r.json();
+    if (!data.ok) { setErr(data.error || "list failed"); return; }
+    render(data.containers || []);
+    document.getElementById("status").textContent =
+      (data.containers || []).length + " containers · " + new Date().toLocaleTimeString();
+  } catch (e) { setErr(String(e)); }
+}
+
+function render(list) {
+  const rows = list.map(c => {
+    const st = (c.active_state || "unknown");
+    const stClass = ["active","failed","inactive","unknown"].includes(st) ? st : "unknown";
+    const sub = c.sub_state ? " / " + esc(c.sub_state) : "";
+    const health = c.health || "none";
+    const acts = ACTIONS.map(a =>
+      `<button onclick="act('${esc(c.name)}','${a}',this)">${a}</button>`).join("") +
+      ` <button onclick="showLogs('${esc(c.name)}')">logs</button>`;
+    return `<tr>
+      <td class="mono">${esc(c.name)}</td>
+      <td><span class="pill ${stClass}">${esc(st)}</span>${sub}</td>
+      <td class="health ${esc(health)}">${esc(health)}</td>
+      <td class="mono">${esc(c.image)}</td>
+      <td class="mono">${short(c.image_id)}</td>
+      <td class="mono">${short(c.hash)}</td>
+      <td><div class="actions">${acts}</div></td>
+    </tr>`;
+  }).join("");
+  document.getElementById("rows").innerHTML = rows ||
+    `<tr><td colspan="7" class="muted">No managed containers.</td></tr>`;
+}
+
+async function act(name, action, btn) {
+  if ((action === "repull" || action === "stop" || action === "redeploy") &&
+      !confirm(action + " " + name + "?")) return;
+  setBusy(btn, true);
+  setErr("");
+  try {
+    const r = await fetch(`api/containers/${encodeURIComponent(name)}/${action}`, { method: "POST" });
+    const data = await r.json();
+    if (!data.ok) setErr(data.error || (action + " failed"));
+  } catch (e) { setErr(String(e)); }
+  setBusy(btn, false);
+  refresh();
+}
+
+async function doSync() {
+  const btn = document.getElementById("syncBtn");
+  setBusy(btn, true); setErr("");
+  try {
+    const r = await fetch("api/sync", { method: "POST" });
+    const data = await r.json();
+    if (!data.ok) setErr(data.error || "sync failed");
+  } catch (e) { setErr(String(e)); }
+  setBusy(btn, false);
+  refresh();
+}
+
+async function showLogs(name) {
+  const box = document.getElementById("logs");
+  document.getElementById("logsTitle").textContent = name + " — last 200 lines";
+  document.getElementById("logsPre").textContent = "loading…";
+  box.classList.add("show");
+  try {
+    const r = await fetch(`api/containers/${encodeURIComponent(name)}/logs?lines=200`);
+    const data = await r.json();
+    document.getElementById("logsPre").textContent = data.ok ? (data.logs || "(no logs)") : (data.error || "error");
+  } catch (e) { document.getElementById("logsPre").textContent = String(e); }
+}
+
+function hideLogs() { document.getElementById("logs").classList.remove("show"); }
+function setErr(m) { document.getElementById("err").textContent = m; }
+function setBusy(btn, b) { if (btn) btn.disabled = b; }
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

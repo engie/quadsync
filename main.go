@@ -30,6 +30,10 @@ func main() {
 		cmdEdit()
 	case "redeploy":
 		cmdRedeploy()
+	case "serve":
+		cmdServe()
+	case "webui":
+		cmdWebUI()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		usage()
@@ -44,6 +48,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  quadsync augment <file>    Print merged result to stdout")
 	fmt.Fprintln(os.Stderr, "  quadsync edit <file>       Edit a .container file, decrypting and re-encrypting secrets")
 	fmt.Fprintln(os.Stderr, "  quadsync redeploy <name>   Force redeployment on next sync")
+	fmt.Fprintln(os.Stderr, "  quadsync serve             Run the control-socket daemon (root)")
+	fmt.Fprintln(os.Stderr, "  quadsync webui             Run the HTTP status/control frontend")
 }
 
 func cmdSync() {
