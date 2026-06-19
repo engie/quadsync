@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -19,8 +20,10 @@ var dashboardFS embed.FS
 // tailnet container whose user is a member of the socket's group.
 func cmdWebUI() {
 	fs := flag.NewFlagSet("webui", flag.ExitOnError)
-	addr := fs.String("addr", ":8765", "HTTP listen address")
+	addr := fs.String("addr", ":8765", "listen address")
 	socketPath := fs.String("socket", defaultControlSocket, "control socket path")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate path (enables HTTPS when set with -tls-key)")
+	tlsKey := fs.String("tls-key", "", "TLS private key path")
 	_ = fs.Parse(os.Args[2:])
 
 	srv := &webServer{socket: *socketPath}
@@ -32,8 +35,30 @@ func cmdWebUI() {
 	mux.HandleFunc("POST /api/containers/{name}/{action}", srv.handleAction)
 	mux.HandleFunc("POST /api/sync", srv.handleSync)
 
-	log.Printf("webui listening on %s (socket %s)", *addr, *socketPath)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	httpSrv := &http.Server{Addr: *addr, Handler: mux}
+
+	if *tlsCert != "" && *tlsKey != "" {
+		// Load the cert per-handshake so renewed Tailscale certs are picked up
+		// without restarting the container. Warn (don't fail) if it's not yet
+		// readable — provisioning may still be in flight on first boot.
+		if _, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey); err != nil {
+			log.Printf("warning: TLS cert not loadable yet (%v); will retry per-connection", err)
+		}
+		httpSrv.TLSConfig = &tls.Config{
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				c, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+				return &c, err
+			},
+		}
+		log.Printf("webui listening on %s (HTTPS, socket %s)", *addr, *socketPath)
+		if err := httpSrv.ListenAndServeTLS("", ""); err != nil {
+			log.Fatalf("webui: %v", err)
+		}
+		return
+	}
+
+	log.Printf("webui listening on %s (HTTP, socket %s)", *addr, *socketPath)
+	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatalf("webui: %v", err)
 	}
 }

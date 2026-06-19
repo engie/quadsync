@@ -15,5 +15,9 @@
 #   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o quadsync-linux-arm64 .
 FROM scratch
 COPY quadsync-linux-arm64 /quadsync
-EXPOSE 8765
-ENTRYPOINT ["/quadsync", "webui", "--addr", ":8765", "--socket", "/run/quadsync/control.sock"]
+# Serves HTTPS on :443 using the Tailscale-provisioned cert that the tailscale
+# transform mounts at /etc/tls (cert.pem/key.pem). Reachable at
+# https://quadstat.<tailnet>/. webui reloads the cert per-handshake, so renewals
+# are picked up without a restart.
+EXPOSE 443
+ENTRYPOINT ["/quadsync", "webui", "--addr", ":443", "--socket", "/run/quadsync/control.sock", "--tls-cert", "/etc/tls/cert.pem", "--tls-key", "/etc/tls/key.pem"]
